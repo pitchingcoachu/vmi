@@ -42,18 +42,13 @@ jobs:
           curl
           lubridate
           
-    - name: Configure rsconnect
+   - name: Configure rsconnect
       env:
         SHINYAPPS_ACCOUNT: ${{ secrets.SHINYAPPS_ACCOUNT }}
         SHINYAPPS_TOKEN: ${{ secrets.SHINYAPPS_TOKEN }}
         SHINYAPPS_SECRET: ${{ secrets.SHINYAPPS_SECRET }}
-        run: |
-        Rscript -e "
-        rsconnect::setAccountInfo(
-          name='${{ secrets.SHINYAPPS_ACCOUNT }}',
-          token='${{ secrets.SHINYAPPS_TOKEN }}',
-          secret='${{ secrets.SHINYAPPS_SECRET }}'
-        )"
+      run: |
+        Rscript -e "rsconnect::setAccountInfo(name='${{ secrets.SHINYAPPS_ACCOUNT }}', token='${{ secrets.SHINYAPPS_TOKEN }}', secret='${{ secrets.SHINYAPPS_SECRET }}')"
         
     - name: Sync VMI data
       id: sync_data
