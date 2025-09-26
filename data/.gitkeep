@@ -1,0 +1,2 @@
+# This file ensures the data directory is tracked by git even when empty
+# The automated sync script will populate this directory with VMI data from TrackMan FTP
