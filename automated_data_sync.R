@@ -1,6 +1,6 @@
 # automated_data_sync.R
 # VMI Baseball Data Automation Script
-# Syncs data from TrackMan FTP, filters for VMI only
+# Downloads ALL data from target date ranges - app will filter
 
 library(RCurl)
 library(tidyverse)
@@ -31,39 +31,16 @@ list_ftp_files <- function(ftp_path) {
   })
 }
 
-# Function to download and filter CSV file
-download_and_filter_csv <- function(remote_file, local_file) {
+# Function to download CSV file (no filtering - download everything)
+download_csv_file <- function(remote_file, local_file) {
   url <- paste0("ftp://", FTP_USER, ":", FTP_PASS, "@", FTP_HOST, remote_file)
   
   tryCatch({
-    # Download file to temporary location
-    temp_file <- tempfile(fileext = ".csv")
-    download.file(url, temp_file, method = "curl", quiet = TRUE)
-    
-    # Read and filter data
-    data <- read_csv(temp_file, show_col_types = FALSE)
-    
-    # Filter for VMI data only
-    vmi_data <- data %>%
-      filter(
-        (if("PitcherTeam" %in% names(data)) PitcherTeam %in% c("VIR_KEY", "VMI_KEY") else FALSE) |
-        (if("BatterTeam" %in% names(data)) BatterTeam %in% c("VIR_KEY", "VMI_KEY") else FALSE)
-      )
-    
-    # Only save if we have VMI data
-    if (nrow(vmi_data) > 0) {
-      write_csv(vmi_data, local_file)
-      cat("Downloaded and filtered", nrow(vmi_data), "VMI rows to", local_file, "\n")
-      unlink(temp_file)
-      return(TRUE)
-    } else {
-      cat("No VMI data found in", remote_file, "\n")
-      unlink(temp_file)
-      return(FALSE)
-    }
-    
+    download.file(url, local_file, method = "curl", quiet = TRUE)
+    cat("Downloaded", remote_file, "to", local_file, "\n")
+    return(TRUE)
   }, error = function(e) {
-    cat("Error processing", remote_file, ":", e$message, "\n")
+    cat("Error downloading", remote_file, ":", e$message, "\n")
     return(FALSE)
   })
 }
@@ -97,6 +74,47 @@ find_csv_files_in_months <- function(base_path, target_months, max_depth = 4) {
           }
         } else {
           # Continue exploring subdirectories
+          item_path_with_slash <- paste0(item_path, "/")
+          explore_directory(item_path_with_slash, depth + 1)
+        }
+      }
+    }
+  }
+  
+  explore_directory(base_path)
+  return(all_files)
+}
+
+# Function to find files from Sept 1st forward in current month
+find_recent_csv_files <- function(base_path, start_date = "2025-09-01", max_depth = 4) {
+  all_files <- character(0)
+  start_date <- as.Date(start_date)
+  current_month <- sprintf("%02d", month(Sys.Date()))
+  
+  # Function to recursively explore directories
+  explore_directory <- function(current_path, depth = 0) {
+    if (depth > max_depth) return()
+    
+    items <- list_ftp_files(current_path)
+    if (length(items) == 0) return()
+    
+    for (item in items) {
+      if (item == "" || item == "." || item == "..") next
+      
+      item_path <- paste0(current_path, item)
+      
+      # If it's a CSV file, check if it's from Sept 1st or later
+      if (grepl("\\.csv$", item, ignore.case = TRUE)) {
+        # Extract date from path if possible (basic check)
+        if (depth >= 2) {  # We're in a day folder
+          all_files <<- c(all_files, item_path)
+        }
+      } else {
+        # Navigate through month/day structure
+        if (depth == 0 && item == current_month) {  # Current month only
+          item_path_with_slash <- paste0(item_path, "/")
+          explore_directory(item_path_with_slash, depth + 1)
+        } else if (depth > 0) {  # Day folders - take everything from Sept 1st forward
           item_path_with_slash <- paste0(item_path, "/")
           explore_directory(item_path_with_slash, depth + 1)
         }
@@ -189,43 +207,45 @@ sync_practice_data <- function() {
     local_filename <- paste0("practice_", gsub("[/:]", "_", basename(remote_path)))
     local_path <- file.path(LOCAL_DATA_DIR, local_filename)
     
-    if (download_and_filter_csv(remote_path, local_path)) {
+    if (download_csv_file(remote_path, local_path)) {
       downloaded_count <- downloaded_count + 1
     }
   }
   
-  cat("Practice sync complete:", downloaded_count, "files with VMI data\n")
+  cat("Practice sync complete:", downloaded_count, "files downloaded\n")
   return(downloaded_count > 0)
 }
 
-# Function to sync v3 data - CHECK EVERY FILE in target months
+# Function to sync v3 data - DOWNLOAD ALL FILES in target date ranges
 sync_v3_data <- function() {
-  cat("Syncing v3 data (VMI only)...\n")
+  cat("Syncing v3 data (ALL files in target ranges)...\n")
   v3_base <- "/v3/2025/"
   
-  # Define target months: Feb(02) through May(05), plus current month
-  current_month <- sprintf("%02d", month(Sys.Date()))
-  target_months <- c("02", "03", "04", "05", current_month)
-  target_months <- unique(target_months)  # Remove duplicates if current month is Feb-May
+  # Historical months: Feb through May
+  historical_months <- c("02", "03", "04", "05")
   
-  cat("Searching months:", paste(target_months, collapse = ", "), "\n")
+  cat("Getting historical data from months:", paste(historical_months, collapse = ", "), "\n")
+  historical_files <- find_csv_files_in_months(v3_base, historical_months, max_depth = 4)
   
-  # Find ALL CSV files in target months
-  all_csv_files <- find_csv_files_in_months(v3_base, target_months, max_depth = 4)
+  cat("Getting recent data from September 1st forward...\n")
+  recent_files <- find_recent_csv_files(v3_base, start_date = "2025-09-01", max_depth = 4)
+  
+  # Combine all files
+  all_csv_files <- c(historical_files, recent_files)
   
   if (length(all_csv_files) == 0) {
-    cat("No CSV files found in v3/2025/ target month folders\n")
+    cat("No CSV files found in v3/2025/ target date ranges\n")
     return(FALSE)
   }
   
-  cat("Found", length(all_csv_files), "total CSV files in v3 target months\n")
+  cat("Found", length(all_csv_files), "total CSV files in v3 target ranges\n")
   
   # Remove exact duplicates only (prefer non-unverified)
   final_files <- remove_duplicate_files(all_csv_files)
   cat("Processing", length(final_files), "files (after removing exact duplicates)\n")
   
   # Process EVERY file in smaller batches
-  batch_size <- 5  # Small batches since we're checking every file
+  batch_size <- 5  # Small batches
   total_files <- length(final_files)
   downloaded_count <- 0
   
@@ -241,7 +261,7 @@ sync_v3_data <- function() {
         local_filename <- paste0("v3_", gsub("[/:]", "_", basename(remote_path)))
         local_path <- file.path(LOCAL_DATA_DIR, local_filename)
         
-        if (download_and_filter_csv(remote_path, local_path)) {
+        if (download_csv_file(remote_path, local_path)) {
           downloaded_count <- downloaded_count + 1
         }
       }
@@ -251,7 +271,7 @@ sync_v3_data <- function() {
     }
   }
   
-  cat("V3 sync complete:", downloaded_count, "files with VMI data\n")
+  cat("V3 sync complete:", downloaded_count, "files downloaded\n")
   return(downloaded_count > 0)
 }
 
