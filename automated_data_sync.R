@@ -1,13 +1,23 @@
-# DEBUG VERSION - automated_data_sync.R
-# Let's see what's actually on the FTP server
+# automated_data_sync.R
+# VMI Baseball Data Automation Script
+# Syncs data from TrackMan FTP, filters for VMI only
 
 library(RCurl)
 library(tidyverse)
+library(lubridate)
 
 # FTP credentials
 FTP_HOST <- "ftp.trackmanbaseball.com"
 FTP_USER <- "VMI"
 FTP_PASS <- "q7MvFhmAEN"
+
+# Local data directory
+LOCAL_DATA_DIR <- "data/"
+
+# Ensure data directory exists
+if (!dir.exists(LOCAL_DATA_DIR)) {
+  dir.create(LOCAL_DATA_DIR, recursive = TRUE)
+}
 
 # Function to list files in FTP directory
 list_ftp_files <- function(ftp_path) {
@@ -21,90 +31,138 @@ list_ftp_files <- function(ftp_path) {
   })
 }
 
-# Main debug function
-debug_ftp_structure <- function() {
-  cat("=== DEBUGGING FTP STRUCTURE ===\n")
+# Function to download and filter CSV file
+download_and_filter_csv <- function(remote_file, local_file) {
+  url <- paste0("ftp://", FTP_USER, ":", FTP_PASS, "@", FTP_HOST, remote_file)
   
-  # Check root directories
-  cat("\n1. ROOT DIRECTORIES:\n")
-  root_items <- list_ftp_files("/")
-  cat("Found in root:", paste(root_items, collapse = ", "), "\n")
-  
-  # Check practice folder
-  cat("\n2. PRACTICE FOLDER STRUCTURE:\n")
-  practice_items <- list_ftp_files("/practice/")
-  cat("Found in /practice/:", paste(practice_items, collapse = ", "), "\n")
-  
-  if ("2025" %in% practice_items) {
-    practice_2025_items <- list_ftp_files("/practice/2025/")
-    cat("Found in /practice/2025/:", paste(practice_2025_items, collapse = ", "), "\n")
+  tryCatch({
+    # Download file to temporary location
+    temp_file <- tempfile(fileext = ".csv")
+    download.file(url, temp_file, method = "curl", quiet = TRUE)
     
-    # Check first few month folders
-    for (month in practice_2025_items[1:min(3, length(practice_2025_items))]) {
-      if (nchar(month) <= 2) {  # Looks like a month folder
-        month_path <- paste0("/practice/2025/", month, "/")
-        month_items <- list_ftp_files(month_path)
-        cat("Found in", month_path, ":", paste(month_items, collapse = ", "), "\n")
-        
-        # Check first day folder
-        if (length(month_items) > 0) {
-          day_path <- paste0(month_path, month_items[1], "/")
-          day_items <- list_ftp_files(day_path)
-          cat("Found in", day_path, ":", paste(day_items, collapse = ", "), "\n")
-        }
-      }
+    # Read and filter data
+    data <- read_csv(temp_file, show_col_types = FALSE)
+    
+    # Filter for VMI data only
+    vmi_data <- data %>%
+      filter(
+        (if("PitcherTeam" %in% names(data)) PitcherTeam %in% c("VIR_KEY", "VMI_KEY") else FALSE) |
+        (if("BatterTeam" %in% names(data)) BatterTeam %in% c("VIR_KEY", "VMI_KEY") else FALSE)
+      )
+    
+    # Only save if we have VMI data
+    if (nrow(vmi_data) > 0) {
+      write_csv(vmi_data, local_file)
+      cat("Downloaded and filtered", nrow(vmi_data), "VMI rows to", local_file, "\n")
+      unlink(temp_file)
+      return(TRUE)
+    } else {
+      cat("No VMI data found in", remote_file, "\n")
+      unlink(temp_file)
+      return(FALSE)
+    }
+    
+  }, error = function(e) {
+    cat("Error processing", remote_file, ":", e$message, "\n")
+    return(FALSE)
+  })
+}
+
+# Function to sync practice data (2025 folder)
+sync_practice_data <- function() {
+  cat("Syncing practice data...\n")
+  practice_path <- "/practice/2025/"
+  
+  files <- list_ftp_files(practice_path)
+  csv_files <- files[grepl("\\.csv$", files, ignore.case = TRUE)]
+  
+  downloaded_count <- 0
+  for (file in csv_files) {
+    remote_path <- paste0(practice_path, file)
+    local_path <- file.path(LOCAL_DATA_DIR, paste0("practice_", file))
+    
+    if (download_and_filter_csv(remote_path, local_path)) {
+      downloaded_count <- downloaded_count + 1
     }
   }
   
-  # Check v3 folder
-  cat("\n3. V3 FOLDER STRUCTURE:\n")
-  v3_items <- list_ftp_files("/v3/")
-  cat("Found in /v3/:", paste(v3_items, collapse = ", "), "\n")
+  cat("Practice sync complete:", downloaded_count, "files with VMI data\n")
+  return(downloaded_count > 0)
+}
+
+# Function to sync v3 data (2025 folder) - only VMI files
+sync_v3_data <- function() {
+  cat("Syncing v3 data (VMI only)...\n")
+  v3_path <- "/v3/2025/"
   
-  if ("2025" %in% v3_items) {
-    v3_2025_items <- list_ftp_files("/v3/2025/")
-    cat("Found in /v3/2025/:", paste(v3_2025_items, collapse = ", "), "\n")
+  files <- list_ftp_files(v3_path)
+  csv_files <- files[grepl("\\.csv$", files, ignore.case = TRUE)]
+  
+  # Process files in batches to avoid memory issues
+  batch_size <- 20  # Smaller batches for efficiency
+  total_files <- length(csv_files)
+  
+  cat("Found", total_files, "CSV files in v3/2025. Processing in batches...\n")
+  
+  downloaded_count <- 0
+  for (i in seq(1, total_files, by = batch_size)) {
+    end_idx <- min(i + batch_size - 1, total_files)
+    batch_files <- csv_files[i:end_idx]
     
-    # Check first few month folders
-    for (month in v3_2025_items[1:min(3, length(v3_2025_items))]) {
-      if (nchar(month) <= 2) {  # Looks like a month folder
-        month_path <- paste0("/v3/2025/", month, "/")
-        month_items <- list_ftp_files(month_path)
-        cat("Found in", month_path, ":", paste(month_items, collapse = ", "), "\n")
-        
-        # Check first day folder
-        if (length(month_items) > 0) {
-          day_path <- paste0(month_path, month_items[1], "/")
-          day_items <- list_ftp_files(day_path)
-          cat("Found in", day_path, ":", paste(day_items, collapse = ", "), "\n")
-          
-          # Check if there's a CSV subfolder
-          if ("CSV" %in% day_items) {
-            csv_path <- paste0(day_path, "CSV/")
-            csv_items <- list_ftp_files(csv_path)
-            cat("Found in", csv_path, ":", paste(head(csv_items, 5), collapse = ", "), "\n")
-          }
-        }
+    cat("Processing batch", ceiling(i/batch_size), "of", ceiling(total_files/batch_size), "\n")
+    
+    for (file in batch_files) {
+      remote_path <- paste0(v3_path, file)
+      local_path <- file.path(LOCAL_DATA_DIR, paste0("v3_", file))
+      
+      if (download_and_filter_csv(remote_path, local_path)) {
+        downloaded_count <- downloaded_count + 1
       }
     }
+    
+    # Small delay between batches to be respectful to the server
+    Sys.sleep(0.5)
   }
   
-  cat("\n=== DEBUG COMPLETE ===\n")
+  cat("V3 sync complete:", downloaded_count, "files with VMI data\n")
+  return(downloaded_count > 0)
 }
 
-# Create data directory
-LOCAL_DATA_DIR <- "data/"
-if (!dir.exists(LOCAL_DATA_DIR)) {
-  dir.create(LOCAL_DATA_DIR, recursive = TRUE)
+# Main sync function
+main_sync <- function() {
+  cat("Starting VMI data sync at", as.character(Sys.time()), "\n")
+  
+  start_time <- Sys.time()
+  
+  # Clean old data files first
+  old_files <- list.files(LOCAL_DATA_DIR, pattern = "\\.(csv|txt)$", full.names = TRUE)
+  if (length(old_files) > 0) {
+    file.remove(old_files)
+    cat("Cleaned", length(old_files), "old data files\n")
+  }
+  
+  # Sync both data sources
+  practice_updated <- sync_practice_data()
+  v3_updated <- sync_v3_data()
+  
+  end_time <- Sys.time()
+  duration <- difftime(end_time, start_time, units = "mins")
+  
+  cat("Data sync completed in", round(duration, 2), "minutes\n")
+  
+  # Update last sync timestamp
+  writeLines(as.character(Sys.time()), file.path(LOCAL_DATA_DIR, "last_sync.txt"))
+  
+  # Return TRUE if any data was updated
+  return(practice_updated || v3_updated)
 }
 
-# Run debug and create a simple file so workflow doesn't fail
-debug_ftp_structure()
-
-# Create a debug file so we have something to commit
-writeLines(c(
-  paste("Debug run completed at:", Sys.time()),
-  "Check the GitHub Actions log to see the FTP structure"
-), file.path(LOCAL_DATA_DIR, "debug_log.txt"))
-
-cat("Debug file created. Check the workflow logs for FTP structure details.\n")
+# Run if called directly
+if (!interactive()) {
+  data_updated <- main_sync()
+  # Exit with code 1 if no data was found (for GitHub Actions)
+  if (!data_updated) {
+    cat("No VMI data found during sync\n")
+    quit(status = 1)
+  }
+}
