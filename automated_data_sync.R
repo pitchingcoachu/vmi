@@ -63,24 +63,47 @@ download_csv <- function(remote_file, local_file) {
   })
 }
 
-# Function to sync practice data (2025 folder)
+# Function to sync practice data (2025 folder with MM/DD structure)
 sync_practice_data <- function() {
   cat("Syncing practice data...\n")
-  practice_path <- "/practice/2025/"
+  practice_base_path <- "/practice/2025/"
   
-  files <- list_ftp_files(practice_path)
-  csv_files <- files[grepl("\\.csv$", files, ignore.case = TRUE)]
-  
-  # Filter out files with "playerpositioning" in the name
-  csv_files <- csv_files[!grepl("playerpositioning", csv_files, ignore.case = TRUE)]
+  # Get all subdirectories (month folders)
+  months <- list_ftp_files(practice_base_path)
+  month_dirs <- months[grepl("^\\d{2}$", months)]  # Match MM format
   
   downloaded_count <- 0
-  for (file in csv_files) {
-    remote_path <- paste0(practice_path, file)
-    local_path <- file.path(LOCAL_DATA_DIR, paste0("practice_", file))
+  
+  for (month_dir in month_dirs) {
+    month_path <- paste0(practice_base_path, month_dir, "/")
+    cat("Checking practice month:", month_dir, "\n")
     
-    if (download_csv(remote_path, local_path)) {
-      downloaded_count <- downloaded_count + 1
+    # Get day folders in this month
+    days <- list_ftp_files(month_path)
+    day_dirs <- days[grepl("^\\d{2}$", days)]  # Match DD format
+    
+    for (day_dir in day_dirs) {
+      day_path <- paste0(month_path, day_dir, "/")
+      cat("Processing practice date: 2025/", month_dir, "/", day_dir, "\n")
+      
+      # Look for CSV files directly in the day folder (no CSV subdirectory)
+      files_in_day <- list_ftp_files(day_path)
+      csv_files <- files_in_day[grepl("\\.csv$", files_in_day, ignore.case = TRUE)]
+      
+      # Filter out files with "playerpositioning" in the name (allow unverified)
+      csv_files <- csv_files[!grepl("playerpositioning", csv_files, ignore.case = TRUE)]
+      
+      for (file in csv_files) {
+        remote_path <- paste0(day_path, file)
+        local_path <- file.path(LOCAL_DATA_DIR, paste0("practice_", month_dir, "_", day_dir, "_", file))
+        
+        if (download_csv(remote_path, local_path)) {
+          downloaded_count <- downloaded_count + 1
+        }
+        
+        # Small delay between files
+        Sys.sleep(0.1)
+      }
     }
   }
   
@@ -219,7 +242,8 @@ deduplicate_files <- function() {
   # Read all CSV files and track source
   for (file in csv_files) {
     tryCatch({
-      data <- read_csv(file, show_col_types = FALSE)
+      # Read all columns as character to avoid type conflicts
+      data <- read_csv(file, show_col_types = FALSE, col_types = cols(.default = "c"))
       if (nrow(data) > 0) {
         # Add source file info for tracking
         data$SourceFile <- basename(file)
