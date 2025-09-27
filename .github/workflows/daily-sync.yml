@@ -2,7 +2,7 @@ name: Daily VMI Data Sync and Deploy
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Run every 6 hours: 12 AM, 6 AM, 12 PM, 6 PM UTC
+    - cron: '0 */6 * * *'  # Run every 6 hours
   workflow_dispatch:  # Allow manual triggering
 
 jobs:
@@ -21,11 +21,18 @@ jobs:
     - name: Install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+        sudo apt-get install -y \
+          libcurl4-openssl-dev \
+          libssl-dev \
+          libxml2-dev \
+          libfontconfig1-dev \
+          libharfbuzz-dev \
+          libfribidi-dev
         
     - name: Install R packages
       run: |
-        install.packages(c("RCurl", "tidyverse", "lubridate", "rsconnect"), repos = "https://cloud.r-project.org/", dependencies = TRUE)
+        options(repos = c(CRAN = "https://cloud.r-project.org/"))
+        install.packages(c("RCurl", "readr", "dplyr", "lubridate", "rsconnect", "tidyverse"), dependencies = TRUE)
       shell: Rscript {0}
           
     - name: Configure rsconnect
@@ -37,11 +44,7 @@ jobs:
         Rscript -e "rsconnect::setAccountInfo(name='${{ secrets.SHINYAPPS_ACCOUNT }}', token='${{ secrets.SHINYAPPS_TOKEN }}', secret='${{ secrets.SHINYAPPS_SECRET }}')"
         
     - name: Sync VMI data
-      id: sync_data
-      run: |
-        Rscript automated_data_sync.R
-        echo "sync_success=true" >> $GITHUB_OUTPUT
-      continue-on-error: true
+      run: Rscript automated_data_sync.R
         
     - name: Check if data directory exists
       id: check_data
