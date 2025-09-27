@@ -106,23 +106,27 @@ sync_v3_data <- function() {
   cat("Found", total_files, "CSV files in v3/2025. Processing in batches...\n")
   
   downloaded_count <- 0
-  for (i in seq(1, total_files, by = batch_size)) {
-    end_idx <- min(i + batch_size - 1, total_files)
-    batch_files <- csv_files[i:end_idx]
-    
-    cat("Processing batch", ceiling(i/batch_size), "of", ceiling(total_files/batch_size), "\n")
-    
-    for (file in batch_files) {
-      remote_path <- paste0(v3_path, file)
-      local_path <- file.path(LOCAL_DATA_DIR, paste0("v3_", file))
+  
+  # Only process if there are files
+  if (total_files > 0) {
+    for (i in seq(1, total_files, by = batch_size)) {
+      end_idx <- min(i + batch_size - 1, total_files)
+      batch_files <- csv_files[i:end_idx]
       
-      if (download_and_filter_csv(remote_path, local_path)) {
-        downloaded_count <- downloaded_count + 1
+      cat("Processing batch", ceiling(i/batch_size), "of", ceiling(total_files/batch_size), "\n")
+      
+      for (file in batch_files) {
+        remote_path <- paste0(v3_path, file)
+        local_path <- file.path(LOCAL_DATA_DIR, paste0("v3_", file))
+        
+        if (download_and_filter_csv(remote_path, local_path)) {
+          downloaded_count <- downloaded_count + 1
+        }
       }
+      
+      # Small delay between batches to be respectful to the server
+      Sys.sleep(0.5)
     }
-    
-    # Small delay between batches to be respectful to the server
-    Sys.sleep(0.5)
   }
   
   cat("V3 sync complete:", downloaded_count, "files with VMI data\n")
