@@ -2,7 +2,7 @@ name: Daily VMI Data Sync and Deploy
 
 on:
   schedule:
-    - cron: '0 10 * * *'  # Run daily at 10 AM UTC (6 AM EST)
+    cron: '0 */6 * * *'  # 12 AM, 6 AM, 12 PM, 6 PM UTC
   workflow_dispatch:  # Allow manual triggering
 
 jobs:
