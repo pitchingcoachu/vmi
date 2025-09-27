@@ -3,7 +3,8 @@
 # Syncs data from TrackMan FTP, filters for VMI only
 
 library(RCurl)
-library(tidyverse)
+library(readr)
+library(dplyr)
 library(lubridate)
 
 # FTP credentials
