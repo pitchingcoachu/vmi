@@ -71,6 +71,9 @@ sync_practice_data <- function() {
   files <- list_ftp_files(practice_path)
   csv_files <- files[grepl("\\.csv$", files, ignore.case = TRUE)]
   
+  # Filter out files with "playerpositioning" in the name
+  csv_files <- csv_files[!grepl("playerpositioning", csv_files, ignore.case = TRUE)]
+  
   downloaded_count <- 0
   for (file in csv_files) {
     remote_path <- paste0(practice_path, file)
@@ -158,6 +161,9 @@ sync_v3_data <- function() {
         csv_files <- list_ftp_files(csv_path)
         csv_files <- csv_files[grepl("\\.csv$", csv_files, ignore.case = TRUE)]
         
+        # Filter out files with "playerpositioning" or "unverified" in v3 folder
+        csv_files <- csv_files[!grepl("playerpositioning|unverified", csv_files, ignore.case = TRUE)]
+        
         for (file in csv_files) {
           remote_path <- paste0(csv_path, file)
           local_path <- file.path(LOCAL_DATA_DIR, paste0("v3_", month_dir, "_", day_dir, "_", file))
@@ -172,6 +178,9 @@ sync_v3_data <- function() {
       } else {
         # Look for CSV files directly in the day folder
         csv_files <- files_in_day[grepl("\\.csv$", files_in_day, ignore.case = TRUE)]
+        
+        # Filter out files with "playerpositioning" or "unverified" in v3 folder
+        csv_files <- csv_files[!grepl("playerpositioning|unverified", csv_files, ignore.case = TRUE)]
         
         for (file in csv_files) {
           remote_path <- paste0(day_path, file)
