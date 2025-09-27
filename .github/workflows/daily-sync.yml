@@ -32,7 +32,7 @@ jobs:
     - name: Install R packages
       run: |
         options(repos = c(CRAN = "https://cloud.r-project.org/"))
-        install.packages(c("RCurl", "readr", "dplyr", "lubridate", "rsconnect", "tidyverse"), dependencies = TRUE)
+        install.packages(c("RCurl", "readr", "dplyr", "lubridate", "rsconnect"), dependencies = TRUE)
       shell: Rscript {0}
           
     - name: Configure rsconnect
