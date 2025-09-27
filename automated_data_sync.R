@@ -68,18 +68,85 @@ download_and_filter_csv <- function(remote_file, local_file) {
   })
 }
 
-# Function to sync practice data (2025 folder)
+# Function to recursively find CSV files in month/day folders
+find_all_csv_files <- function(base_path, max_depth = 3) {
+  all_files <- character(0)
+  
+  # Function to recursively explore directories
+  explore_directory <- function(current_path, depth = 0) {
+    if (depth > max_depth) return()
+    
+    items <- list_ftp_files(current_path)
+    if (length(items) == 0) return()
+    
+    for (item in items) {
+      if (item == "" || item == "." || item == "..") next
+      
+      item_path <- paste0(current_path, item)
+      
+      # If it's a CSV file, add it
+      if (grepl("\\.csv$", item, ignore.case = TRUE)) {
+        all_files <<- c(all_files, item_path)
+      } else {
+        # If it might be a directory, explore it
+        item_path_with_slash <- paste0(item_path, "/")
+        explore_directory(item_path_with_slash, depth + 1)
+      }
+    }
+  }
+  
+  explore_directory(base_path)
+  return(all_files)
+}
+
+# Function to choose best file when duplicates exist (prefer non-unverified)
+choose_best_files <- function(file_paths) {
+  if (length(file_paths) == 0) return(character(0))
+  
+  # Group files by date pattern (extract date from path)
+  file_df <- data.frame(
+    path = file_paths,
+    is_unverified = grepl("unverified", file_paths, ignore.case = TRUE),
+    stringsAsFactors = FALSE
+  )
+  
+  # Extract date pattern from path (MM/DD format)
+  file_df$date_key <- str_extract(file_df$path, "/\\d{2}/\\d{2}/")
+  
+  # Group by date and choose best file for each date
+  best_files <- file_df %>%
+    group_by(date_key) %>%
+    arrange(is_unverified) %>%  # FALSE (non-unverified) comes first
+    slice(1) %>%  # Take the first (best) file for each date
+    pull(path)
+  
+  return(best_files)
+}
+
+# Function to sync practice data (practice/2025/MM/DD/csvfile structure)
 sync_practice_data <- function() {
   cat("Syncing practice data...\n")
-  practice_path <- "/practice/2025/"
+  practice_base <- "/practice/2025/"
   
-  files <- list_ftp_files(practice_path)
-  csv_files <- files[grepl("\\.csv$", files, ignore.case = TRUE)]
+  # Find all CSV files in the month/day folder structure
+  all_csv_files <- find_all_csv_files(practice_base)
+  
+  if (length(all_csv_files) == 0) {
+    cat("No CSV files found in practice/2025/ folders\n")
+    return(FALSE)
+  }
+  
+  cat("Found", length(all_csv_files), "CSV files in practice folders\n")
+  
+  # Choose best files (prefer non-unverified)
+  best_files <- choose_best_files(all_csv_files)
+  cat("Processing", length(best_files), "best files (after removing duplicates)\n")
   
   downloaded_count <- 0
-  for (file in csv_files) {
-    remote_path <- paste0(practice_path, file)
-    local_path <- file.path(LOCAL_DATA_DIR, paste0("practice_", file))
+  for (remote_path in best_files) {
+    # Create local filename from the remote path
+    local_filename <- paste0("practice_", gsub("[/:]", "_", basename(remote_path)))
+    local_path <- file.path(LOCAL_DATA_DIR, local_filename)
     
     if (download_and_filter_csv(remote_path, local_path)) {
       downloaded_count <- downloaded_count + 1
@@ -90,38 +157,50 @@ sync_practice_data <- function() {
   return(downloaded_count > 0)
 }
 
-# Function to sync v3 data (2025 folder) - only VMI files
+# Function to sync v3 data (v3/2025/MM/DD/CSV/csvfile structure)
 sync_v3_data <- function() {
   cat("Syncing v3 data (VMI only)...\n")
-  v3_path <- "/v3/2025/"
+  v3_base <- "/v3/2025/"
   
-  files <- list_ftp_files(v3_path)
-  csv_files <- files[grepl("\\.csv$", files, ignore.case = TRUE)]
+  # Find all CSV files in the month/day/CSV folder structure
+  all_csv_files <- find_all_csv_files(v3_base, max_depth = 4)  # Deeper for v3 structure
   
-  # Process files in batches to avoid memory issues
-  batch_size <- 20  # Smaller batches for efficiency
-  total_files <- length(csv_files)
+  if (length(all_csv_files) == 0) {
+    cat("No CSV files found in v3/2025/ folders\n")
+    return(FALSE)
+  }
   
-  cat("Found", total_files, "CSV files in v3/2025. Processing in batches...\n")
+  cat("Found", length(all_csv_files), "CSV files in v3 folders\n")
   
+  # Choose best files (prefer non-unverified)
+  best_files <- choose_best_files(all_csv_files)
+  cat("Processing", length(best_files), "best files (after removing duplicates)\n")
+  
+  # Process files in batches
+  batch_size <- 10  # Smaller batches for v3 data
+  total_files <- length(best_files)
   downloaded_count <- 0
-  for (i in seq(1, total_files, by = batch_size)) {
-    end_idx <- min(i + batch_size - 1, total_files)
-    batch_files <- csv_files[i:end_idx]
-    
-    cat("Processing batch", ceiling(i/batch_size), "of", ceiling(total_files/batch_size), "\n")
-    
-    for (file in batch_files) {
-      remote_path <- paste0(v3_path, file)
-      local_path <- file.path(LOCAL_DATA_DIR, paste0("v3_", file))
+  
+  if (total_files > 0) {
+    for (i in seq(1, total_files, by = batch_size)) {
+      end_idx <- min(i + batch_size - 1, total_files)
+      batch_files <- best_files[i:end_idx]
       
-      if (download_and_filter_csv(remote_path, local_path)) {
-        downloaded_count <- downloaded_count + 1
+      cat("Processing batch", ceiling(i/batch_size), "of", ceiling(total_files/batch_size), "\n")
+      
+      for (remote_path in batch_files) {
+        # Create local filename from the remote path
+        local_filename <- paste0("v3_", gsub("[/:]", "_", basename(remote_path)))
+        local_path <- file.path(LOCAL_DATA_DIR, local_filename)
+        
+        if (download_and_filter_csv(remote_path, local_path)) {
+          downloaded_count <- downloaded_count + 1
+        }
       }
+      
+      # Small delay between batches
+      Sys.sleep(0.5)
     }
-    
-    # Small delay between batches to be respectful to the server
-    Sys.sleep(0.5)
   }
   
   cat("V3 sync complete:", downloaded_count, "files with VMI data\n")
