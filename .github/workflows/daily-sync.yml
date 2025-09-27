@@ -2,8 +2,8 @@ name: Daily VMI Data Sync and Deploy
 
 on:
   schedule:
-    cron: '0 */6 * * *'  # 12 AM, 6 AM, 12 PM, 6 PM UTC
-  workflow_dispatch:  # Allow manual triggering
+    - cron: '0 10 * * *'
+  workflow_dispatch:
 
 jobs:
   sync-and-deploy:
@@ -24,23 +24,9 @@ jobs:
         sudo apt-get install -y libcurl4-openssl-dev libssl-dev
         
     - name: Setup R dependencies
-      uses: r-lib/actions/setup-r-dependencies@v2
-      with:
-        extra-packages: |
-          RCurl
-          tidyverse
-          rsconnect
-          shiny
-          DT
-          gridExtra
-          ggplot2
-          patchwork
-          hexbin
-          ggiraph
-          httr2
-          MASS
-          curl
-          lubridate
+      run: |
+        install.packages(c("RCurl", "readr", "dplyr", "tidyverse", "lubridate", "rsconnect"), repos = "https://cloud.r-project.org/")
+      shell: Rscript {0}
           
     - name: Configure rsconnect
       env:
