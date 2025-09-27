@@ -77,6 +77,11 @@ sync_practice_data <- function() {
   files <- list_ftp_files(practice_path)
   csv_files <- files[grepl("\\.csv$", files, ignore.case = TRUE)]
   
+  if (length(csv_files) == 0) {
+    cat("No CSV files found in practice folder\n")
+    return(FALSE)
+  }
+  
   downloaded_count <- 0
   for (file in csv_files) {
     remote_path <- paste0(practice_path, file)
@@ -99,13 +104,19 @@ sync_v3_data <- function() {
   files <- list_ftp_files(v3_path)
   csv_files <- files[grepl("\\.csv$", files, ignore.case = TRUE)]
   
-  # Process files in batches to avoid memory issues
-  batch_size <- 20  # Smaller batches for efficiency
   total_files <- length(csv_files)
+  cat("Found", total_files, "CSV files in v3/2025\n")
   
-  cat("Found", total_files, "CSV files in v3/2025. Processing in batches...\n")
+  # Check if there are any files to process
+  if (total_files == 0) {
+    cat("No CSV files found in v3/2025 folder\n")
+    return(FALSE)
+  }
   
+  # Process files in batches to avoid memory issues
+  batch_size <- 20
   downloaded_count <- 0
+  
   for (i in seq(1, total_files, by = batch_size)) {
     end_idx <- min(i + batch_size - 1, total_files)
     batch_files <- csv_files[i:end_idx]
@@ -155,15 +166,19 @@ main_sync <- function() {
   writeLines(as.character(Sys.time()), file.path(LOCAL_DATA_DIR, "last_sync.txt"))
   
   # Return TRUE if any data was updated
-  return(practice_updated || v3_updated)
+  data_updated <- practice_updated || v3_updated
+  
+  if (!data_updated) {
+    cat("No VMI data found in any source\n")
+  }
+  
+  return(data_updated)
 }
 
 # Run if called directly
 if (!interactive()) {
   data_updated <- main_sync()
-  # Exit with code 1 if no data was found (for GitHub Actions)
-  if (!data_updated) {
-    cat("No VMI data found during sync\n")
-    quit(status = 1)
-  }
+  # Exit with code 0 even if no data found (don't fail the workflow)
+  # The workflow will check if data directory has files
+  cat("Script completed. Data updated:", data_updated, "\n")
 }
