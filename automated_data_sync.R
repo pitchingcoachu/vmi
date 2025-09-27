@@ -6,6 +6,7 @@ library(RCurl)
 library(readr)
 library(dplyr)
 library(lubridate)
+library(stringr)
 
 # FTP credentials
 FTP_HOST <- "ftp.trackmanbaseball.com"
@@ -32,8 +33,8 @@ list_ftp_files <- function(ftp_path) {
   })
 }
 
-# Function to download and filter CSV file
-download_and_filter_csv <- function(remote_file, local_file) {
+# Function to download CSV file (no filtering - app will handle filtering)
+download_csv <- function(remote_file, local_file) {
   url <- paste0("ftp://", FTP_USER, ":", FTP_PASS, "@", FTP_HOST, remote_file)
   
   tryCatch({
@@ -41,24 +42,17 @@ download_and_filter_csv <- function(remote_file, local_file) {
     temp_file <- tempfile(fileext = ".csv")
     download.file(url, temp_file, method = "curl", quiet = TRUE)
     
-    # Read and filter data
+    # Read data to check if valid
     data <- read_csv(temp_file, show_col_types = FALSE)
     
-    # Filter for VMI data only
-    vmi_data <- data %>%
-      filter(
-        (if("PitcherTeam" %in% names(data)) PitcherTeam %in% c("VIR_KEY", "VMI_KEY") else FALSE) |
-        (if("BatterTeam" %in% names(data)) BatterTeam %in% c("VIR_KEY", "VMI_KEY") else FALSE)
-      )
-    
-    # Only save if we have VMI data
-    if (nrow(vmi_data) > 0) {
-      write_csv(vmi_data, local_file)
-      cat("Downloaded and filtered", nrow(vmi_data), "VMI rows to", local_file, "\n")
+    # Only save if we have data
+    if (nrow(data) > 0) {
+      write_csv(data, local_file)
+      cat("Downloaded", nrow(data), "rows to", local_file, "\n")
       unlink(temp_file)
       return(TRUE)
     } else {
-      cat("No VMI data found in", remote_file, "\n")
+      cat("No data found in", remote_file, "\n")
       unlink(temp_file)
       return(FALSE)
     }
@@ -82,55 +76,203 @@ sync_practice_data <- function() {
     remote_path <- paste0(practice_path, file)
     local_path <- file.path(LOCAL_DATA_DIR, paste0("practice_", file))
     
-    if (download_and_filter_csv(remote_path, local_path)) {
+    if (download_csv(remote_path, local_path)) {
       downloaded_count <- downloaded_count + 1
     }
   }
   
-  cat("Practice sync complete:", downloaded_count, "files with VMI data\n")
+  cat("Practice sync complete:", downloaded_count, "files downloaded\n")
   return(downloaded_count > 0)
 }
 
-# Function to sync v3 data (2025 folder) - only VMI files
+# Function to check if file date is in allowed ranges
+is_date_in_range <- function(file_path) {
+  # Extract date from file path (YYYY/MM/DD pattern)
+  date_match <- stringr::str_match(file_path, "(20\\d{2})/(0[1-9]|1[0-2])/(0[1-9]|[12]\\d|3[01])")
+  
+  if (is.na(date_match[1])) {
+    # If no date pattern found, include the file (safer approach)
+    return(TRUE)
+  }
+  
+  file_date <- as.Date(paste(date_match[2], date_match[3], date_match[4], sep = "-"))
+  current_year <- as.numeric(format(Sys.Date(), "%Y"))
+  
+  # Define date ranges for 2025
+  feb_1_2025 <- as.Date("2025-02-01")
+  may_31_2025 <- as.Date("2025-05-31")
+  sep_1_2025 <- as.Date("2025-09-01")
+  
+  # For 2025: Feb 1 - May 31, then Sep 1 onwards
+  if (lubridate::year(file_date) == 2025) {
+    return((file_date >= feb_1_2025 & file_date <= may_31_2025) | 
+           (file_date >= sep_1_2025))
+  }
+  
+  # For future years: Sep 1 onwards only
+  if (lubridate::year(file_date) > 2025) {
+    sep_1_future <- as.Date(paste0(lubridate::year(file_date), "-09-01"))
+    return(file_date >= sep_1_future)
+  }
+  
+  # For past years: exclude
+  return(FALSE)
+}
+
+# Function to sync v3 data with date filtering
 sync_v3_data <- function() {
-  cat("Syncing v3 data (VMI only)...\n")
-  v3_path <- "/v3/2025/"
+  cat("Syncing v3 data with date filtering...\n")
+  v3_base_path <- "/v3/2025/"
   
-  files <- list_ftp_files(v3_path)
-  csv_files <- files[grepl("\\.csv$", files, ignore.case = TRUE)]
-  
-  # Process files in batches to avoid memory issues
-  batch_size <- 20  # Smaller batches for efficiency
-  total_files <- length(csv_files)
-  
-  cat("Found", total_files, "CSV files in v3/2025. Processing in batches...\n")
+  # Get all subdirectories (month folders)
+  months <- list_ftp_files(v3_base_path)
+  month_dirs <- months[grepl("^\\d{2}$", months)]  # Match MM format
   
   downloaded_count <- 0
   
-  # Only process if there are files
-  if (total_files > 0) {
-    for (i in seq(1, total_files, by = batch_size)) {
-      end_idx <- min(i + batch_size - 1, total_files)
-      batch_files <- csv_files[i:end_idx]
+  for (month_dir in month_dirs) {
+    month_path <- paste0(v3_base_path, month_dir, "/")
+    cat("Checking month:", month_dir, "\n")
+    
+    # Get day folders in this month
+    days <- list_ftp_files(month_path)
+    day_dirs <- days[grepl("^\\d{2}$", days)]  # Match DD format
+    
+    for (day_dir in day_dirs) {
+      day_path <- paste0(month_path, day_dir, "/")
+      full_date_path <- paste0("2025/", month_dir, "/", day_dir)
       
-      cat("Processing batch", ceiling(i/batch_size), "of", ceiling(total_files/batch_size), "\n")
-      
-      for (file in batch_files) {
-        remote_path <- paste0(v3_path, file)
-        local_path <- file.path(LOCAL_DATA_DIR, paste0("v3_", file))
-        
-        if (download_and_filter_csv(remote_path, local_path)) {
-          downloaded_count <- downloaded_count + 1
-        }
+      # Check if this date is in our allowed ranges
+      if (!is_date_in_range(full_date_path)) {
+        next  # Skip this date
       }
       
-      # Small delay between batches to be respectful to the server
-      Sys.sleep(0.5)
+      cat("Processing date: 2025/", month_dir, "/", day_dir, "\n")
+      
+      # Look for CSV folder or direct CSV files
+      files_in_day <- list_ftp_files(day_path)
+      
+      # Check if there's a CSV subdirectory
+      if ("CSV" %in% files_in_day) {
+        csv_path <- paste0(day_path, "CSV/")
+        csv_files <- list_ftp_files(csv_path)
+        csv_files <- csv_files[grepl("\\.csv$", csv_files, ignore.case = TRUE)]
+        
+        for (file in csv_files) {
+          remote_path <- paste0(csv_path, file)
+          local_path <- file.path(LOCAL_DATA_DIR, paste0("v3_", month_dir, "_", day_dir, "_", file))
+          
+          if (download_csv(remote_path, local_path)) {
+            downloaded_count <- downloaded_count + 1
+          }
+          
+          # Small delay between files
+          Sys.sleep(0.1)
+        }
+      } else {
+        # Look for CSV files directly in the day folder
+        csv_files <- files_in_day[grepl("\\.csv$", files_in_day, ignore.case = TRUE)]
+        
+        for (file in csv_files) {
+          remote_path <- paste0(day_path, file)
+          local_path <- file.path(LOCAL_DATA_DIR, paste0("v3_", month_dir, "_", day_dir, "_", file))
+          
+          if (download_csv(remote_path, local_path)) {
+            downloaded_count <- downloaded_count + 1
+          }
+          
+          # Small delay between files
+          Sys.sleep(0.1)
+        }
+      }
     }
   }
   
-  cat("V3 sync complete:", downloaded_count, "files with VMI data\n")
+  cat("V3 sync complete:", downloaded_count, "files downloaded\n")
   return(downloaded_count > 0)
+}
+
+# Function to remove duplicate data across all CSV files
+deduplicate_files <- function() {
+  cat("Starting deduplication process...\n")
+  
+  # Get all CSV files in the data directory
+  csv_files <- list.files(LOCAL_DATA_DIR, pattern = "\\.csv$", full.names = TRUE)
+  
+  if (length(csv_files) == 0) {
+    cat("No CSV files found for deduplication\n")
+    return(FALSE)
+  }
+  
+  all_data <- list()
+  file_sources <- list()
+  
+  # Read all CSV files and track source
+  for (file in csv_files) {
+    tryCatch({
+      data <- read_csv(file, show_col_types = FALSE)
+      if (nrow(data) > 0) {
+        # Add source file info for tracking
+        data$SourceFile <- basename(file)
+        all_data[[length(all_data) + 1]] <- data
+        file_sources[[length(file_sources) + 1]] <- file
+      }
+    }, error = function(e) {
+      cat("Error reading", file, ":", e$message, "\n")
+    })
+  }
+  
+  if (length(all_data) == 0) {
+    cat("No valid data found in CSV files\n")
+    return(FALSE)
+  }
+  
+  # Combine all data
+  combined_data <- bind_rows(all_data)
+  
+  # Create deduplication key based on available columns
+  # Use common columns that should be unique per pitch
+  key_cols <- c("Date", "Pitcher", "Batter", "PitchNo", "PlateLocSide", "PlateLocHeight", 
+                "RelSpeed", "TaggedPitchType", "Balls", "Strikes")
+  
+  # Only use columns that actually exist
+  available_key_cols <- intersect(key_cols, names(combined_data))
+  
+  if (length(available_key_cols) == 0) {
+    cat("Warning: No key columns found for deduplication. Using all columns.\n")
+    available_key_cols <- names(combined_data)[!names(combined_data) %in% "SourceFile"]
+  }
+  
+  # Remove duplicates, keeping the first occurrence
+  original_count <- nrow(combined_data)
+  deduplicated_data <- combined_data %>%
+    distinct(across(all_of(available_key_cols)), .keep_all = TRUE)
+  
+  duplicates_removed <- original_count - nrow(deduplicated_data)
+  
+  if (duplicates_removed > 0) {
+    cat("Removed", duplicates_removed, "duplicate rows\n")
+    
+    # Split back by source and rewrite files
+    for (source_file in unique(deduplicated_data$SourceFile)) {
+      file_data <- deduplicated_data %>%
+        filter(SourceFile == source_file) %>%
+        select(-SourceFile)
+      
+      if (nrow(file_data) > 0) {
+        # Find the original file path
+        original_path <- csv_files[basename(csv_files) == source_file]
+        if (length(original_path) == 1) {
+          write_csv(file_data, original_path)
+          cat("Rewrote", original_path, "with", nrow(file_data), "unique rows\n")
+        }
+      }
+    }
+  } else {
+    cat("No duplicates found\n")
+  }
+  
+  return(duplicates_removed > 0)
 }
 
 # Main sync function
@@ -155,6 +297,11 @@ main_sync <- function() {
   
   cat("Data sync completed in", round(duration, 2), "minutes\n")
   
+  # Deduplicate downloaded files if any data was updated
+  if (practice_updated || v3_updated) {
+    deduplicate_files()
+  }
+  
   # Update last sync timestamp
   writeLines(as.character(Sys.time()), file.path(LOCAL_DATA_DIR, "last_sync.txt"))
   
@@ -167,7 +314,7 @@ if (!interactive()) {
   data_updated <- main_sync()
   # Exit with code 1 if no data was found (for GitHub Actions)
   if (!data_updated) {
-    cat("No VMI data found during sync\n")
+    cat("No data found during sync\n")
     quit(status = 1)
   }
 }
