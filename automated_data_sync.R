@@ -35,6 +35,12 @@ list_ftp_files <- function(ftp_path) {
 
 # Function to download CSV file (no filtering - app will handle filtering)
 download_csv <- function(remote_file, local_file) {
+  # Skip if file already exists (incremental sync)
+  if (file.exists(local_file)) {
+    cat("Skipping existing file:", basename(local_file), "\n")
+    return(FALSE)  # Return FALSE so we don't count it as newly downloaded
+  }
+  
   url <- paste0("ftp://", FTP_USER, ":", FTP_PASS, "@", FTP_HOST, remote_file)
   
   tryCatch({
@@ -122,27 +128,12 @@ is_date_in_range <- function(file_path) {
   }
   
   file_date <- as.Date(paste(date_match[2], date_match[3], date_match[4], sep = "-"))
-  current_year <- as.numeric(format(Sys.Date(), "%Y"))
   
-  # Define date ranges for 2025
-  feb_1_2025 <- as.Date("2025-02-01")
-  may_31_2025 <- as.Date("2025-05-31")
-  sep_1_2025 <- as.Date("2025-09-01")
+  # Start date: August 1, 2025 (nothing before this)
+  start_date <- as.Date("2025-08-01")
   
-  # For 2025: Feb 1 - May 31, then Sep 1 onwards
-  if (lubridate::year(file_date) == 2025) {
-    return((file_date >= feb_1_2025 & file_date <= may_31_2025) | 
-           (file_date >= sep_1_2025))
-  }
-  
-  # For future years: Sep 1 onwards only
-  if (lubridate::year(file_date) > 2025) {
-    sep_1_future <- as.Date(paste0(lubridate::year(file_date), "-09-01"))
-    return(file_date >= sep_1_future)
-  }
-  
-  # For past years: exclude
-  return(FALSE)
+  # Include all data from August 1, 2025 onwards (no future year restrictions)
+  return(file_date >= start_date)
 }
 
 # Function to sync v3 data with date filtering
@@ -314,11 +305,18 @@ main_sync <- function() {
   
   start_time <- Sys.time()
   
-  # Clean old data files first
-  old_files <- list.files(LOCAL_DATA_DIR, pattern = "\\.(csv|txt)$", full.names = TRUE)
-  if (length(old_files) > 0) {
-    file.remove(old_files)
-    cat("Cleaned", length(old_files), "old data files\n")
+  # Only clean old files if this is the first run (no last_sync.txt exists)
+  # This prevents re-downloading everything on subsequent runs
+  last_sync_file <- file.path(LOCAL_DATA_DIR, "last_sync.txt")
+  if (!file.exists(last_sync_file)) {
+    cat("First run detected - cleaning old data files\n")
+    old_files <- list.files(LOCAL_DATA_DIR, pattern = "\\.(csv|txt)$", full.names = TRUE)
+    if (length(old_files) > 0) {
+      file.remove(old_files)
+      cat("Cleaned", length(old_files), "old data files\n")
+    }
+  } else {
+    cat("Incremental sync - keeping existing files\n")
   }
   
   # Sync both data sources
