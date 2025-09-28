@@ -12,6 +12,10 @@ library(hexbin)
 library(ggiraph)
 library(httr2)
 library(MASS)  # for kde2d in heatmaps
+
+# Check if akima package is available
+have_akima <- requireNamespace("akima", quietly = TRUE)
+
 # --- media uploads (Cloudinary) ---
 # raise upload size if needed (50 MB here)
 options(shiny.maxRequestSize = 50 * 1024^2)
