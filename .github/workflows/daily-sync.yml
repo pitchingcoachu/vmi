@@ -2,7 +2,7 @@ name: Daily VMI Data Sync and Deploy
 
 on:
   schedule:
-    - cron: '0 */12 * * *'  # Every 12 hours
+    - cron: '0 */6 * * *'  # Run every 6 hours
   workflow_dispatch:  # Allow manual triggering
 
 jobs:
@@ -59,7 +59,7 @@ jobs:
         fi
         
     - name: Deploy to shinyapps.io
-      if: steps.check_data.outputs.data_updated == 'true'
+      if: steps.check_data.outputs.data_updated == 'true' || github.event_name == 'workflow_dispatch'
       run: Rscript deploy_script.R
       
     - name: Commit updated data
