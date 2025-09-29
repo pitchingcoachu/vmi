@@ -30,10 +30,7 @@ jobs:
           libfribidi-dev
         
     - name: Install R packages
-      run: |
-        options(repos = c(CRAN = "https://cloud.r-project.org/"))
-        install.packages(c("RCurl", "readr", "dplyr", "lubridate", "rsconnect"), dependencies = TRUE)
-      shell: Rscript {0}
+      run: Rscript install_packages.R
           
     - name: Configure rsconnect
       env:
