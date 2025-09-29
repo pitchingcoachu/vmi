@@ -7,6 +7,19 @@ library(rsconnect)
 # Deploy to shinyapps.io
 deploy_app <- function() {
   tryCatch({
+    # Install required packages if not already installed
+    required_packages <- c("shiny", "tidyverse", "DT", "gridExtra", "ggplot2", 
+                          "patchwork", "hexbin", "ggiraph", "httr2", "MASS", 
+                          "curl", "readr", "lubridate", "stringr", "akima", 
+                          "plotly", "RCurl", "jsonlite")
+    
+    for (pkg in required_packages) {
+      if (!requireNamespace(pkg, quietly = TRUE)) {
+        cat("Installing package:", pkg, "\n")
+        install.packages(pkg)
+      }
+    }
+    
     # Deploy the app
     deployApp(
       appDir = ".",
