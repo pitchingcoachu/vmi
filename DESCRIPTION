@@ -1,0 +1,26 @@
+Type: Application
+Title: VMI Baseball Analytics
+Version: 1.0.0
+Description: VMI Baseball Analytics Shiny Application
+Depends: R (>= 4.0.0)
+Imports:
+    shiny,
+    tidyverse,
+    dplyr,
+    ggplot2,
+    DT,
+    gridExtra,
+    patchwork,
+    rsconnect,
+    hexbin,
+    ggiraph,
+    httr2,
+    MASS,
+    curl,
+    readr,
+    lubridate,
+    stringr,
+    akima,
+    plotly,
+    RCurl,
+    jsonlite
