@@ -343,9 +343,11 @@ main_sync <- function() {
 # Run if called directly
 if (!interactive()) {
   data_updated <- main_sync()
-  # Exit with code 1 if no data was found (for GitHub Actions)
+  # Always exit successfully - no new data is normal for incremental sync
   if (!data_updated) {
-    cat("No data found during sync\n")
-    quit(status = 1)
+    cat("No new data found during sync - this is normal for incremental sync\n")
+  } else {
+    cat("New data was downloaded and processed\n")
   }
+  cat("Sync completed successfully\n")
 }
