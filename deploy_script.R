@@ -58,7 +58,7 @@ deploy_app <- function() {
     cat("Deploying to shinyapps.io...\n")
     deployApp(
       appDir = ".",
-      appName = "harvardbaseball",
+      appName = "vmibaseball",
       forceUpdate = TRUE,
       launch.browser = FALSE,
       logLevel = "verbose"
@@ -77,7 +77,7 @@ deploy_app <- function() {
 
 # Run deployment
 if (!interactive()) {
-  cat("Harvard - Deployment Script\n")
+  cat("VMI - Deployment Script\n")
   cat("==========================================\n")
   success <- deploy_app()
   if (!success) {
