@@ -5539,7 +5539,7 @@ mod_leader_server <- function(id, is_active = shiny::reactive(TRUE)) {
       req(is_active())
       base <- switch(
         input$domain,
-        "Pitching" = if (input$sessionType == "All") pitch_data_pitching else dplyr::filter(pitch_data_pitching, SessionType == input$sessionType),
+        "Pitching" = if (input$sessionType == "All") pitch_data_pitching else dplyr::filter(modified_pitch_data(), SessionType == input$sessionType),
         "Hitting"  = if (input$sessionType == "All") pitch_data               else dplyr::filter(pitch_data,            SessionType == input$sessionType),
         "Catching" = if (input$sessionType == "All") pitch_data               else dplyr::filter(pitch_data,            SessionType == input$sessionType)
       )
@@ -7857,6 +7857,41 @@ $(document).off('click.pcuOpenMedia', 'a.open-media')
 server <- function(input, output, session) {
   
   session_label_from <- function(df) {
+  # Reactive value to store modified pitch data with persistent storage
+  modified_pitch_data <- reactiveVal()
+  
+  # Load existing modifications on startup
+  observe({
+    modifications_file <- "pitch_modifications.rds"
+    
+    # Load original data
+    original_data <- pitch_data_pitching
+    
+    # Apply any stored modifications
+    if (file.exists(modifications_file)) {
+      stored_mods <- readRDS(modifications_file)
+      
+      # Apply modifications to original data
+      modified_data <- original_data
+      for (i in 1:nrow(stored_mods)) {
+        mod <- stored_mods[i, ]
+        # Find matching rows using multiple fields for robustness
+        match_idx <- which(
+          modified_data$Pitcher == mod$Pitcher &
+          modified_data$Date == mod$Date &
+          abs(modified_data$RelSpeed - mod$RelSpeed) < 0.1 &
+          abs(modified_data$HorzBreak - mod$HorzBreak) < 0.1 &
+          abs(modified_data$InducedVertBreak - mod$InducedVertBreak) < 0.1
+        )
+        if (length(match_idx) > 0) {
+          modified_data$TaggedPitchType[match_idx[1]] <- mod$new_pitch_type
+        }
+      }
+      modified_pitch_data(modified_data)
+    } else {
+      modified_pitch_data(original_data)
+    }
+  })
     s <- unique(na.omit(as.character(df$SessionType)))
     if (length(s) == 1) s else "All"
   }
@@ -8177,7 +8212,7 @@ server <- function(input, output, session) {
   observeEvent(TRUE, {
     req(input$sessionType, input$pitcher)
     df_base <- if (input$sessionType == "All") pitch_data_pitching else
-      dplyr::filter(pitch_data_pitching, SessionType == input$sessionType)
+      dplyr::filter(modified_pitch_data(), SessionType == input$sessionType)
     
     last_date <- if (input$pitcher == "All") {
       max(df_base$Date, na.rm = TRUE)
@@ -8411,7 +8446,7 @@ server <- function(input, output, session) {
     req(input$sessionType)
     
     df_base <- if (input$sessionType == "All") pitch_data_pitching else
-      dplyr::filter(pitch_data_pitching, SessionType == input$sessionType)
+      dplyr::filter(modified_pitch_data(), SessionType == input$sessionType)
     
     sel_raw <- unique(df_base$Pitcher[norm_email(df_base$Email) == norm_email(user_email())]) %>% na.omit()
     
@@ -8433,7 +8468,7 @@ server <- function(input, output, session) {
   
   observeEvent(input$sessionType, {
     df_base <- if (input$sessionType == "All") pitch_data_pitching else
-      dplyr::filter(pitch_data_pitching, SessionType == input$sessionType)
+      dplyr::filter(modified_pitch_data(), SessionType == input$sessionType)
     last_date <- if (is.null(input$pitcher) || input$pitcher == "All") {
       max(df_base$Date, na.rm = TRUE)
     } else {
@@ -8450,13 +8485,13 @@ server <- function(input, output, session) {
     is_valid_dates <- function(d) !is.null(d) && length(d) == 2 && all(is.finite(d))
     nnz <- function(x) !is.null(x) && !is.na(x)
     
-    if (!is_valid_dates(input$dates)) return(pitch_data_pitching[0, , drop = FALSE])
+    if (!is_valid_dates(input$dates)) return(modified_pitch_data()[0, , drop = FALSE])
     
     pitch_types <- if (is.null(input$pitchType) || !length(input$pitchType)) "All" else input$pitchType
     
     # Session type
-    df <- if (identical(input$sessionType, "All")) pitch_data_pitching
-    else dplyr::filter(pitch_data_pitching, SessionType == input$sessionType)
+    df <- if (identical(input$sessionType, "All")) modified_pitch_data()
+    else dplyr::filter(modified_pitch_data(), SessionType == input$sessionType)
     
     # ⛔️ Drop warmups & blank pitch types
     if ("TaggedPitchType" %in% names(df)) {
@@ -8536,7 +8571,7 @@ server <- function(input, output, session) {
     
     # first, honor Session Type
     df <- if (input$sessionType == "All") pitch_data_pitching else
-      dplyr::filter(pitch_data_pitching, SessionType == input$sessionType)
+      dplyr::filter(modified_pitch_data(), SessionType == input$sessionType)
     
     # Live-only BatterSide filter
     if (!is.null(input$batterSide) && input$batterSide != "All") {
@@ -9026,7 +9061,8 @@ server <- function(input, output, session) {
         ggiraph::opts_sizing(rescale = TRUE),
         ggiraph::opts_tooltip(use_fill = TRUE, css = tooltip_css),
         ggiraph::opts_hover(css = "stroke:black;stroke-width:1.5px;"),
-        ggiraph::opts_hover_inv(css = "opacity:0.15;")
+        ggiraph::opts_hover_inv(css = "opacity:0.15;"),
+        ggiraph::opts_selection(type = "multiple", selected = character(0))
       )
     )
   })
@@ -10705,11 +10741,220 @@ server <- function(input, output, session) {
           css = "color:white;font-weight:600;padding:6px;border-radius:8px;text-shadow:0 1px 1px rgba(0,0,0,.4);"
         ),
         ggiraph::opts_hover(css = "stroke:black;stroke-width:1.5px;"),
-        ggiraph::opts_hover_inv(css = "opacity:0.15;")
+        ggiraph::opts_hover_inv(css = "opacity:0.15;"),
+        ggiraph::opts_selection(type = "multiple", selected = character(0))
       )
     )
   })
+  # Event handlers for movement plot pitch type editing
+  observeEvent(input$movementPlot_selected, {
+    req(input$movementPlot_selected)
+    selected_ids <- as.numeric(input$movementPlot_selected)
+    df <- filtered_data()
+    if (!nrow(df) || !length(selected_ids)) return()
+    
+    # Get selected pitches
+    selected_pitches <- df[selected_ids, ]
+    
+    # Show modal for editing pitch types
+    showModal(modalDialog(
+      title = paste("Edit Pitch Type for", nrow(selected_pitches), "pitch(es)"),
+      selectInput("new_pitch_type", "New Pitch Type:",
+                  choices = c("Fastball", "Sinker", "Cutter", "Slider", "Sweeper", 
+                             "Curveball", "ChangeUp", "Splitter", "Knuckleball"),
+                  selected = selected_pitches$TaggedPitchType[1]),
+      br(),
+      strong("Selected Pitches:"),
+      br(),
+      if (nrow(selected_pitches) <= 10) {
+        div(
+          lapply(1:nrow(selected_pitches), function(i) {
+            p <- selected_pitches[i, ]
+            div(sprintf("Pitch %d: %s - %s (%.1f mph, HB: %.1f, IVB: %.1f)",
+                       i, p$TaggedPitchType, p$Date, 
+                       p$RelSpeed %||% 0, p$HorzBreak %||% 0, p$InducedVertBreak %||% 0))
+          })
+        )
+      } else {
+        div(sprintf("%d pitches selected (too many to display individually)", nrow(selected_pitches)))
+      },
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("confirm_pitch_edit", "Save Changes", class = "btn-primary")
+      ),
+      easyClose = FALSE
+    ))
+    
+    # Store selected data for use in confirm handler
+    session$userData$selected_for_edit <- selected_pitches
+  })
   
+  # Confirm pitch type changes (main movement plot)
+  observeEvent(input$confirm_pitch_edit, {
+    req(session$userData$selected_for_edit, input$new_pitch_type)
+    
+    selected_pitches <- session$userData$selected_for_edit
+    new_type <- input$new_pitch_type
+    
+    # Update the modified pitch data
+    current_data <- modified_pitch_data()
+    
+    # Update each selected pitch using multiple matching criteria
+    for (i in 1:nrow(selected_pitches)) {
+      p <- selected_pitches[i, ]
+      # Find matching rows using multiple fields for robustness
+      match_idx <- which(
+        current_data$Pitcher == p$Pitcher &
+        current_data$Date == p$Date &
+        abs(current_data$RelSpeed - (p$RelSpeed %||% 0)) < 0.1 &
+        abs(current_data$HorzBreak - (p$HorzBreak %||% 0)) < 0.1 &
+        abs(current_data$InducedVertBreak - (p$InducedVertBreak %||% 0)) < 0.1
+      )
+      if (length(match_idx) > 0) {
+        current_data$TaggedPitchType[match_idx[1]] <- new_type
+      }
+    }
+    
+    # Update reactive value
+    modified_pitch_data(current_data)
+    
+    # Save modifications to file
+    save_pitch_modifications(selected_pitches, new_type)
+    
+    removeModal()
+    session$userData$selected_for_edit <- NULL
+  })
+  
+  # Event handlers for summary movement plot pitch type editing
+  observeEvent(input$summary_movementPlot_selected, {
+    req(input$summary_movementPlot_selected)
+    selected_ids <- as.numeric(input$summary_movementPlot_selected)
+    df <- filtered_data()
+    if (!nrow(df) || !length(selected_ids)) return()
+    
+    # Get selected pitches
+    selected_pitches <- df[selected_ids, ]
+    
+    # Show modal for editing pitch types
+    showModal(modalDialog(
+      title = paste("Edit Pitch Type for", nrow(selected_pitches), "pitch(es)"),
+      selectInput("new_pitch_type_summary", "New Pitch Type:",
+                  choices = c("Fastball", "Sinker", "Cutter", "Slider", "Sweeper", 
+                             "Curveball", "ChangeUp", "Splitter", "Knuckleball"),
+                  selected = selected_pitches$TaggedPitchType[1]),
+      br(),
+      strong("Selected Pitches:"),
+      br(),
+      if (nrow(selected_pitches) <= 10) {
+        div(
+          lapply(1:nrow(selected_pitches), function(i) {
+            p <- selected_pitches[i, ]
+            div(sprintf("Pitch %d: %s - %s (%.1f mph, HB: %.1f, IVB: %.1f)",
+                       i, p$TaggedPitchType, p$Date, 
+                       p$RelSpeed %||% 0, p$HorzBreak %||% 0, p$InducedVertBreak %||% 0))
+          })
+        )
+      } else {
+        div(sprintf("%d pitches selected (too many to display individually)", nrow(selected_pitches)))
+      },
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("confirm_pitch_edit_summary", "Save Changes", class = "btn-primary")
+      ),
+      easyClose = FALSE
+    ))
+    
+    # Store selected data for use in confirm handler
+    session$userData$selected_for_edit_summary <- selected_pitches
+  })
+  
+  # Confirm pitch type changes (summary movement plot)
+  observeEvent(input$confirm_pitch_edit_summary, {
+    req(session$userData$selected_for_edit_summary, input$new_pitch_type_summary)
+    
+    selected_pitches <- session$userData$selected_for_edit_summary
+    new_type <- input$new_pitch_type_summary
+    
+    # Update the modified pitch data
+    current_data <- modified_pitch_data()
+    
+    # Update each selected pitch using multiple matching criteria
+    for (i in 1:nrow(selected_pitches)) {
+      p <- selected_pitches[i, ]
+      # Find matching rows using multiple fields for robustness
+      match_idx <- which(
+        current_data$Pitcher == p$Pitcher &
+        current_data$Date == p$Date &
+        abs(current_data$RelSpeed - (p$RelSpeed %||% 0)) < 0.1 &
+        abs(current_data$HorzBreak - (p$HorzBreak %||% 0)) < 0.1 &
+        abs(current_data$InducedVertBreak - (p$InducedVertBreak %||% 0)) < 0.1
+      )
+      if (length(match_idx) > 0) {
+        current_data$TaggedPitchType[match_idx[1]] <- new_type
+      }
+    }
+    
+    # Update reactive value
+    modified_pitch_data(current_data)
+    
+    # Save modifications to file
+    save_pitch_modifications(selected_pitches, new_type)
+    
+    removeModal()
+    session$userData$selected_for_edit_summary <- NULL
+  })
+  
+  # Helper function to save modifications
+  save_pitch_modifications <- function(selected_pitches, new_type) {
+    modifications_file <- "pitch_modifications.rds"
+    
+    # Load existing modifications
+    if (file.exists(modifications_file)) {
+      stored_mods <- readRDS(modifications_file)
+    } else {
+      stored_mods <- data.frame(
+        Pitcher = character(0),
+        Date = as.Date(character(0)),
+        RelSpeed = numeric(0),
+        HorzBreak = numeric(0),
+        InducedVertBreak = numeric(0),
+        original_pitch_type = character(0),
+        new_pitch_type = character(0),
+        modified_at = as.POSIXct(character(0)),
+        stringsAsFactors = FALSE
+      )
+    }
+    
+    # Add new modifications
+    new_mods <- data.frame(
+      Pitcher = selected_pitches$Pitcher,
+      Date = selected_pitches$Date,
+      RelSpeed = selected_pitches$RelSpeed %||% 0,
+      HorzBreak = selected_pitches$HorzBreak %||% 0,
+      InducedVertBreak = selected_pitches$InducedVertBreak %||% 0,
+      original_pitch_type = selected_pitches$TaggedPitchType,
+      new_pitch_type = new_type,
+      modified_at = Sys.time(),
+      stringsAsFactors = FALSE
+    )
+    
+    # Remove any existing modifications for the same pitches (using multiple field matching)
+    for (i in 1:nrow(new_mods)) {
+      stored_mods <- stored_mods[!(
+        stored_mods$Pitcher == new_mods$Pitcher[i] &
+        stored_mods$Date == new_mods$Date[i] &
+        abs(stored_mods$RelSpeed - new_mods$RelSpeed[i]) < 0.1 &
+        abs(stored_mods$HorzBreak - new_mods$HorzBreak[i]) < 0.1 &
+        abs(stored_mods$InducedVertBreak - new_mods$InducedVertBreak[i]) < 0.1
+      ), ]
+    }
+    
+    # Combine and save
+    all_mods <- rbind(stored_mods, new_mods)
+    saveRDS(all_mods, modifications_file)
+    
+    message(sprintf("Saved %d pitch type modifications", nrow(new_mods)))
+  }  
   # Velocity Plot
   # Helper: pick the first existing column name from a preference list
   # ---------- helpers (replace the previous .pick_col) ----------
