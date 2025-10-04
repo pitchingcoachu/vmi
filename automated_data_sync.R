@@ -178,7 +178,7 @@ sync_v3_data <- function() {
         csv_files <- csv_files[grepl("\\.csv$", csv_files, ignore.case = TRUE)]
         
         # Filter out files with "playerpositioning" or "unverified" in v3 folder
-        csv_files <- csv_files[!grepl("playerpositioning|unverified", csv_files, ignore.case = TRUE)]
+        csv_files <- csv_files[!grepl("playerpositioning", csv_files, ignore.case = TRUE)]
         
         for (file in csv_files) {
           remote_path <- paste0(csv_path, file)
