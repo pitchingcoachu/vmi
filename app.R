@@ -20,50 +20,6 @@ options(shiny.maxRequestSize = 50 * 1024^2)
 # Optional team scoping: blank = no filter
 if (!exists("TEAM_CODE", inherits = TRUE)) TEAM_CODE <- ""
 
-# ---- VMI Data Loading Function ----
-# Function to load all VMI data from the data directory
-load_vmi_data <- function() {
-  data_dir <- "data/"
-  
-  # Check if data directory exists
-  if (!dir.exists(data_dir)) {
-    cat("Data directory not found. Creating empty data frame.\n")
-    return(tibble::tibble())
-  }
-  
-  # Get all CSV files
-  data_files <- list.files(data_dir, pattern = "\\.csv$", full.names = TRUE)
-  
-  if (length(data_files) == 0) {
-    cat("No CSV files found in data directory.\n")
-    return(tibble::tibble())
-  }
-  
-  cat("Loading", length(data_files), "data files...\n")
-  
-  # Combine all CSV files
-  all_data <- map_dfr(data_files, ~ {
-    tryCatch({
-      data <- read_csv(.x, show_col_types = FALSE)
-      cat("Loaded", nrow(data), "rows from", basename(.x), "\n")
-      data
-    }, error = function(e) {
-      cat("Error reading", .x, ":", e$message, "\n")
-      tibble::tibble()
-    })
-  })
-  
-  cat("Total data loaded:", nrow(all_data), "rows\n")
-  return(all_data)
-}
-
-# Load VMI data at startup
-cat("Initializing VMI data...\n")
-vmi_data <- load_vmi_data()
-
-# If your app previously used a different variable name for data, 
-# you may need to update references throughout the app to use 'vmi_data'
-
 # ---- Heatmap constants and functions for Player Plans ----
 HEAT_BINS <- 6
 HEAT_EV_THRESHOLD <- 90
@@ -502,6 +458,7 @@ datatable_with_colvis <- function(df, lock = character(0), remember = TRUE, defa
 stuff_cols    <- c("Pitch","#","Velo","Max","IVB","HB","rTilt","bTilt", "SpinEff","Spin","Height","Side","Ext","VAA","HAA","Stuff+")
 process_cols  <- c("Pitch","#","BF","Usage","InZone%","Comp%","Strike%","FPS%","E+A%","Whiff%","CSW%","EV","LA","Ctrl+","QP+")
 results_cols  <- c("Pitch","#","BF","IP","K%","BB%","BABIP","GB%","Barrel%","AVG","SLG","xWOBA","xISO","FIP","WHIP","Pitching+")
+banny_cols    <- c("Pitch","Usage","Strike%","InZone%","Comp%","Velo","IVB","HB","Stuff+","QP+","Pitching+")
 perf_cols     <- c("Pitch","#","BF","Usage","InZone%","Comp%","Strike%","FPS%","E+A%","K%","BB%","Whiff%","CSW%","EV","LA","Ctrl+","QP+","Pitching+")
 # all_table_cols will auto-include QP+ via the union
 
@@ -509,11 +466,12 @@ perf_cols     <- c("Pitch","#","BF","Usage","InZone%","Comp%","Strike%","FPS%","
 # stuff_cols, process_cols, results_cols, perf_cols
 
 # ---- NEW: unified list for the pickers + a helper to compute visibility
-all_table_cols <- unique(c(stuff_cols, process_cols, results_cols, perf_cols))
+all_table_cols <- unique(c(stuff_cols, process_cols, results_cols, banny_cols, perf_cols))
 
 visible_set_for <- function(mode, custom = character(0)) {
   if (identical(mode, "Process")) return(process_cols)
   if (identical(mode, "Results")) return(results_cols)
+  if (identical(mode, "Banny"))   return(banny_cols)
   if (identical(mode, "Custom"))  return(unique(c("Pitch", custom)))
   # Default
   stuff_cols
@@ -1402,26 +1360,7 @@ apply_count_filter <- function(df, selection) {
 
 # Robust m/d/y date parser for mixed inputs
 parse_date_mdy <- function(x) {
-  x <- trimws(as.character(x))
-  # strip any time portion (" 1:00 PM", "T12:34:56", etc.)
-  x <- sub("^([0-9/\\-]+).*", "\\1", x)
-  
-  out <- suppressWarnings(as.Date(
-    x,
-    tryFormats = c("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%Y%m%d")
-  ))
-  
-  bad <- is.na(out)
-  if (any(bad)) {
-    num <- suppressWarnings(as.numeric(x[bad]))   # Excel serials
-    is_serial <- !is.na(num) & num > 20000 & num < 60000
-    if (any(is_serial)) {
-      tmp <- out[bad]
-      tmp[is_serial] <- as.Date(num[is_serial], origin = "1899-12-30")
-      out[bad] <- tmp
-    }
-  }
-  out
+  parse_date_flex(x)
 }
 
 
@@ -1707,7 +1646,9 @@ pitch_data <- pitch_data %>%
     ),
     KorBB           = as.character(KorBB),
     Balls           = as.numeric(Balls),
-    Strikes         = as.numeric(Strikes)
+    Strikes         = as.numeric(Strikes),
+    # Convert FourSeamFastBall to Fastball
+    TaggedPitchType = ifelse(TaggedPitchType == "FourSeamFastBall", "Fastball", TaggedPitchType)
   ) %>%
   dplyr::filter(!is.na(TaggedPitchType) & tolower(TaggedPitchType) != "undefined") %>%
   force_pitch_levels()
@@ -2668,11 +2609,11 @@ mod_hit_server <- function(id, is_active = shiny::reactive(TRUE)) {
     
     # ----- TEAM FILTER (LSU only) -----
     # keep your current default if you want
-    TEAM_CODE <- "VIR_KEY"    
+    TEAM_CODE <- "GRA_CAN"
+    
     # Map team-code synonyms (extend this list as needed)
     TEAM_SYNONYMS <- list(
-      VIR_KEY = c("VIR_KEY", "VMI_KEY"),
-      VMI_KEY = c("VIR_KEY", "VMI_KEY")
+      GRA_CAN = c("GRA_CAN")
     )
     
     codes_for <- function(code) {
@@ -5479,11 +5420,11 @@ mod_leader_server <- function(id, is_active = shiny::reactive(TRUE)) {
     ns <- session$ns
     
     # ---------- constants ----------
-    TEAM_CODE <- "VIR_KEY"    
+    TEAM_CODE <- "GRA_CAN"
+    
     # Map team-code synonyms (extend this list as needed)
     TEAM_SYNONYMS <- list(
-      VIR_KEY = c("VIR_KEY", "VMI_KEY"),
-      VMI_KEY = c("VIR_KEY", "VMI_KEY")
+      GRA_CAN = c("GRA_CAN")
     )
     
     # ---------- small helpers ----------
@@ -5539,7 +5480,7 @@ mod_leader_server <- function(id, is_active = shiny::reactive(TRUE)) {
       req(is_active())
       base <- switch(
         input$domain,
-        "Pitching" = if (input$sessionType == "All") pitch_data_pitching else dplyr::filter(modified_pitch_data(), SessionType == input$sessionType),
+        "Pitching" = if (input$sessionType == "All") pitch_data_pitching else dplyr::filter(pitch_data_pitching, SessionType == input$sessionType),
         "Hitting"  = if (input$sessionType == "All") pitch_data               else dplyr::filter(pitch_data,            SessionType == input$sessionType),
         "Catching" = if (input$sessionType == "All") pitch_data               else dplyr::filter(pitch_data,            SessionType == input$sessionType)
       )
@@ -7716,11 +7657,10 @@ player_plans_ui <- function() {
 }
 
 
-# New suite navbar around it
-ui <- tagList(
-  # --- Custom navbar colors & styling ---
-  tags$head(
-    tags$style(HTML("
+  ui <- tagList(
+    # --- Custom navbar colors & styling ---
+    tags$head(
+      tags$style(HTML("
       /* LSU navbar */
       .navbar-inverse { background-color:#000000; border-color:#000000; }
       .navbar { box-shadow: 0 2px 8px rgba(0,0,0,.15); }
@@ -7772,10 +7712,10 @@ ui <- tagList(
         box-shadow: 0 2px 8px rgba(0,0,0,.25);
       }
     "))
-  ),
-  
-  # --- Global click handler for Notes → jump back to saved view ---
-  tags$script(HTML("
+    ),
+    
+    # --- Global click handler for Notes → jump back to saved view ---
+    tags$script(HTML("
     document.addEventListener('click', function(e){
       var a = e.target.closest('a.note-jump'); if(!a) return;
       e.preventDefault();
@@ -7786,8 +7726,8 @@ ui <- tagList(
       }, {priority:'event'});
     }, true);
   ")),
-  
-  tags$script(HTML("
+    
+    tags$script(HTML("
 // Avoid double-binding by namespacing and unbinding first
 $(document).off('click.pcuOpenMedia', 'a.open-media')
   .on('click.pcuOpenMedia', 'a.open-media', function(e){
@@ -7798,8 +7738,8 @@ $(document).off('click.pcuOpenMedia', 'a.open-media')
     Shiny.setInputValue('open_media', {url: url, type: typ, nonce: Math.random()}, {priority:'event'});
   });
 ")),
-  
-  tags$style(HTML("
+    
+    tags$style(HTML("
     /* Custom note button color */
     #openNote.btn-note {
       background-color:#FDD023;   /* base */
@@ -7816,17 +7756,18 @@ $(document).off('click.pcuOpenMedia', 'a.open-media')
       outline:none;
     }
   ")), 
-  # --- Floating "Add Note" button (top-right, all pages) ---
-  absolutePanel(
-    style = "background:transparent; border:none; box-shadow:none; z-index:2000;",
-    actionButton("openNote", label = NULL, icon = icon("sticky-note"),
-                 class = "btn btn-note", title = "Add Note"),
-    top = 60, right = 12, width = 50, fixed = TRUE, draggable = FALSE
-  ),
+    # --- Floating "Add Note" button (top-right, all pages) ---
+    absolutePanel(
+      style = "background:transparent; border:none; box-shadow:none; z-index:2000;",
+      actionButton("openNote", label = NULL, icon = icon("sticky-note"),
+                   class = "btn btn-note", title = "Add Note"),
+      top = 60, right = 12, width = 50, fixed = TRUE, draggable = FALSE
+    ),
+  
   
   navbarPage(
     title = tagList(
-      tags$img(src = "VMIlogo.png", class = "brand-logo", alt = "GCU"),
+      tags$img(src = "VMIlogo.png", class = "brand-logo", alt = "VMI"),
       tags$span("Dashboard", class = "brand-title"),
       tags$img(src = "PCUlogo.png", class = "pcu-right", alt = "PCU")
     ),
@@ -7856,42 +7797,37 @@ $(document).off('click.pcuOpenMedia', 'a.open-media')
 # Server logic
 server <- function(input, output, session) {
   
-  session_label_from <- function(df) {
-  # Reactive value to store modified pitch data with persistent storage
+  # Reactive value to store modified pitch data with edits persisted
   modified_pitch_data <- reactiveVal()
   
-  # Load existing modifications on startup
-  observe({
-    modifications_file <- "pitch_modifications.rds"
-    
-    # Load original data
-    original_data <- pitch_data_pitching
-    
-    # Apply any stored modifications
-    if (file.exists(modifications_file)) {
-      stored_mods <- readRDS(modifications_file)
-      
-      # Apply modifications to original data
-      modified_data <- original_data
-      for (i in 1:nrow(stored_mods)) {
-        mod <- stored_mods[i, ]
-        # Find matching rows using multiple fields for robustness
-        match_idx <- which(
-          modified_data$Pitcher == mod$Pitcher &
-          modified_data$Date == mod$Date &
-          abs(modified_data$RelSpeed - mod$RelSpeed) < 0.1 &
-          abs(modified_data$HorzBreak - mod$HorzBreak) < 0.1 &
-          abs(modified_data$InducedVertBreak - mod$InducedVertBreak) < 0.1
-        )
-        if (length(match_idx) > 0) {
-          modified_data$TaggedPitchType[match_idx[1]] <- mod$new_pitch_type
-        }
+  # Load existing modifications if they exist
+  modifications_file <- "pitch_modifications.rds"
+  if (file.exists(modifications_file)) {
+    stored_mods <- readRDS(modifications_file)
+    temp_data <- pitch_data_pitching %>%
+      mutate(original_row_id = row_number())  # Add unique identifier
+    # Apply stored modifications
+    for (i in seq_len(nrow(stored_mods))) {
+      mod <- stored_mods[i, ]
+      # Find matching rows using multiple fields for robustness
+      match_idx <- which(
+        temp_data$Pitcher == mod$Pitcher &
+        temp_data$Date == mod$Date &
+        abs(temp_data$RelSpeed - (mod$RelSpeed %||% 0)) < 0.1 &
+        abs(temp_data$HorzBreak - (mod$HorzBreak %||% 0)) < 0.1 &
+        abs(temp_data$InducedVertBreak - (mod$InducedVertBreak %||% 0)) < 0.1
+      )
+      if (length(match_idx) > 0) {
+        # If multiple matches, take the first one
+        temp_data$TaggedPitchType[match_idx[1]] <- mod$new_pitch_type
       }
-      modified_pitch_data(modified_data)
-    } else {
-      modified_pitch_data(original_data)
     }
-  })
+    modified_pitch_data(temp_data)
+  } else {
+    modified_pitch_data(pitch_data_pitching %>% mutate(original_row_id = row_number()))
+  }
+  
+  session_label_from <- function(df) {
     s <- unique(na.omit(as.character(df$SessionType)))
     if (length(s) == 1) s else "All"
   }
@@ -8212,7 +8148,7 @@ server <- function(input, output, session) {
   observeEvent(TRUE, {
     req(input$sessionType, input$pitcher)
     df_base <- if (input$sessionType == "All") pitch_data_pitching else
-      dplyr::filter(modified_pitch_data(), SessionType == input$sessionType)
+      dplyr::filter(pitch_data_pitching, SessionType == input$sessionType)
     
     last_date <- if (input$pitcher == "All") {
       max(df_base$Date, na.rm = TRUE)
@@ -8374,7 +8310,7 @@ server <- function(input, output, session) {
     tagList(
       radioButtons(
         "summaryTableMode", label = NULL,
-        choices  = c("Stuff","Process","Results","Custom"),
+        choices  = c("Stuff","Process","Results","Banny","Custom"),
         selected = sel,
         inline   = TRUE
       ),
@@ -8400,7 +8336,7 @@ server <- function(input, output, session) {
     tagList(
       radioButtons(
         "dpTableMode", label = NULL,
-        choices  = c("Stuff","Process","Results","Custom"),
+        choices  = c("Stuff","Process","Results","Banny","Custom"),
         selected = sel,
         inline   = TRUE
       ),
@@ -8446,7 +8382,7 @@ server <- function(input, output, session) {
     req(input$sessionType)
     
     df_base <- if (input$sessionType == "All") pitch_data_pitching else
-      dplyr::filter(modified_pitch_data(), SessionType == input$sessionType)
+      dplyr::filter(pitch_data_pitching, SessionType == input$sessionType)
     
     sel_raw <- unique(df_base$Pitcher[norm_email(df_base$Email) == norm_email(user_email())]) %>% na.omit()
     
@@ -8468,7 +8404,7 @@ server <- function(input, output, session) {
   
   observeEvent(input$sessionType, {
     df_base <- if (input$sessionType == "All") pitch_data_pitching else
-      dplyr::filter(modified_pitch_data(), SessionType == input$sessionType)
+      dplyr::filter(pitch_data_pitching, SessionType == input$sessionType)
     last_date <- if (is.null(input$pitcher) || input$pitcher == "All") {
       max(df_base$Date, na.rm = TRUE)
     } else {
@@ -8489,7 +8425,7 @@ server <- function(input, output, session) {
     
     pitch_types <- if (is.null(input$pitchType) || !length(input$pitchType)) "All" else input$pitchType
     
-    # Session type
+    # Session type - use modified data instead of original
     df <- if (identical(input$sessionType, "All")) modified_pitch_data()
     else dplyr::filter(modified_pitch_data(), SessionType == input$sessionType)
     
@@ -8571,7 +8507,7 @@ server <- function(input, output, session) {
     
     # first, honor Session Type
     df <- if (input$sessionType == "All") pitch_data_pitching else
-      dplyr::filter(modified_pitch_data(), SessionType == input$sessionType)
+      dplyr::filter(pitch_data_pitching, SessionType == input$sessionType)
     
     # Live-only BatterSide filter
     if (!is.null(input$batterSide) && input$batterSide != "All") {
@@ -9787,8 +9723,11 @@ server <- function(input, output, session) {
       df_table <- df_table %>% dplyr::relocate(`Pitching+`, .after = dplyr::last_col())
     }
     
-    df_table <- enforce_process_order(df_table)
-    df_table <- enforce_stuff_order(df_table)
+    # Skip column reordering for Banny mode to preserve exact order
+    if (!identical(mode, "Banny")) {
+      df_table <- enforce_process_order(df_table)
+      df_table <- enforce_stuff_order(df_table)
+    }
     
     visible_set <- visible_set_for(mode, custom)
     datatable_with_colvis(
@@ -10245,8 +10184,11 @@ server <- function(input, output, session) {
       df_table <- df_table %>% dplyr::relocate(`Pitching+`, .after = dplyr::last_col())
     }
     
-    df_table <- enforce_process_order(df_table)
-    df_table <- enforce_stuff_order(df_table)
+    # Skip column reordering for Banny mode to preserve exact order
+    if (!identical(mode, "Banny")) {
+      df_table <- enforce_process_order(df_table)
+      df_table <- enforce_stuff_order(df_table)
+    }
     
     visible_set <- visible_set_for(mode, custom)
     datatable_with_colvis(
@@ -10746,6 +10688,7 @@ server <- function(input, output, session) {
       )
     )
   })
+  
   # Event handlers for movement plot pitch type editing
   observeEvent(input$movementPlot_selected, {
     req(input$movementPlot_selected)
@@ -10789,43 +10732,7 @@ server <- function(input, output, session) {
     session$userData$selected_for_edit <- selected_pitches
   })
   
-  # Confirm pitch type changes (main movement plot)
-  observeEvent(input$confirm_pitch_edit, {
-    req(session$userData$selected_for_edit, input$new_pitch_type)
-    
-    selected_pitches <- session$userData$selected_for_edit
-    new_type <- input$new_pitch_type
-    
-    # Update the modified pitch data
-    current_data <- modified_pitch_data()
-    
-    # Update each selected pitch using multiple matching criteria
-    for (i in 1:nrow(selected_pitches)) {
-      p <- selected_pitches[i, ]
-      # Find matching rows using multiple fields for robustness
-      match_idx <- which(
-        current_data$Pitcher == p$Pitcher &
-        current_data$Date == p$Date &
-        abs(current_data$RelSpeed - (p$RelSpeed %||% 0)) < 0.1 &
-        abs(current_data$HorzBreak - (p$HorzBreak %||% 0)) < 0.1 &
-        abs(current_data$InducedVertBreak - (p$InducedVertBreak %||% 0)) < 0.1
-      )
-      if (length(match_idx) > 0) {
-        current_data$TaggedPitchType[match_idx[1]] <- new_type
-      }
-    }
-    
-    # Update reactive value
-    modified_pitch_data(current_data)
-    
-    # Save modifications to file
-    save_pitch_modifications(selected_pitches, new_type)
-    
-    removeModal()
-    session$userData$selected_for_edit <- NULL
-  })
-  
-  # Event handlers for summary movement plot pitch type editing
+  # Event handler for summary movement plot
   observeEvent(input$summary_movementPlot_selected, {
     req(input$summary_movementPlot_selected)
     selected_ids <- as.numeric(input$summary_movementPlot_selected)
@@ -10866,6 +10773,42 @@ server <- function(input, output, session) {
     
     # Store selected data for use in confirm handler
     session$userData$selected_for_edit_summary <- selected_pitches
+  })
+  
+  # Confirm pitch type changes (main movement plot)
+  observeEvent(input$confirm_pitch_edit, {
+    req(session$userData$selected_for_edit, input$new_pitch_type)
+    
+    selected_pitches <- session$userData$selected_for_edit
+    new_type <- input$new_pitch_type
+    
+    # Update the modified pitch data
+    current_data <- modified_pitch_data()
+    
+    # Update each selected pitch using multiple matching criteria
+    for (i in 1:nrow(selected_pitches)) {
+      p <- selected_pitches[i, ]
+      # Find matching rows using multiple fields for robustness
+      match_idx <- which(
+        current_data$Pitcher == p$Pitcher &
+        current_data$Date == p$Date &
+        abs(current_data$RelSpeed - (p$RelSpeed %||% 0)) < 0.1 &
+        abs(current_data$HorzBreak - (p$HorzBreak %||% 0)) < 0.1 &
+        abs(current_data$InducedVertBreak - (p$InducedVertBreak %||% 0)) < 0.1
+      )
+      if (length(match_idx) > 0) {
+        current_data$TaggedPitchType[match_idx[1]] <- new_type
+      }
+    }
+    
+    # Update reactive value
+    modified_pitch_data(current_data)
+    
+    # Save modifications to file
+    save_pitch_modifications(selected_pitches, new_type)
+    
+    removeModal()
+    session$userData$selected_for_edit <- NULL
   })
   
   # Confirm pitch type changes (summary movement plot)
@@ -10954,7 +10897,8 @@ server <- function(input, output, session) {
     saveRDS(all_mods, modifications_file)
     
     message(sprintf("Saved %d pitch type modifications", nrow(new_mods)))
-  }  
+  }
+  
   # Velocity Plot
   # Helper: pick the first existing column name from a preference list
   # ---------- helpers (replace the previous .pick_col) ----------
@@ -12076,8 +12020,7 @@ server <- function(input, output, session) {
         # Team synonyms for LSU
         codes_for <- function(code) {
           TEAM_SYNONYMS <- list(
-            VIR_KEY = c("VIR_KEY", "VMI_KEY"),
-            VMI_KEY = c("VIR_KEY", "VMI_KEY")
+            GRA_CAN = c("GRA_CAN")
           )
           if (code %in% names(TEAM_SYNONYMS)) TEAM_SYNONYMS[[code]] else code
         }
@@ -12092,8 +12035,7 @@ server <- function(input, output, session) {
         # Team synonyms for LSU
         codes_for <- function(code) {
           TEAM_SYNONYMS <- list(
-            VIR_KEY = c("VIR_KEY", "VMI_KEY"),
-            VMI_KEY = c("VIR_KEY", "VMI_KEY")
+            GRA_CAN = c("GRA_CAN")
           )
           if (code %in% names(TEAM_SYNONYMS)) TEAM_SYNONYMS[[code]] else code
         }
@@ -12270,8 +12212,7 @@ server <- function(input, output, session) {
         # Team synonyms for LSU
         codes_for <- function(code) {
           TEAM_SYNONYMS <- list(
-            VIR_KEY = c("VIR_KEY", "VMI_KEY"),
-            VMI_KEY = c("VIR_KEY", "VMI_KEY")
+            GRA_CAN = c("GRA_CAN")
           )
           if (code %in% names(TEAM_SYNONYMS)) TEAM_SYNONYMS[[code]] else code
         }
@@ -14521,4 +14462,5 @@ server <- function(input, output, session) {
   output$calc2_hb_adj <- renderText(hb_adj_text(input$calc2_hand, input$calc2_hb))
 }
 # ---------- Run ----------
-shinyApp(ui=ui, server=server)
+shinyApp(ui=ui, server=server)# app.R
+# Shiny pitching report with per-player privacy + admin view + customized Stuff+ metric per pitch type
