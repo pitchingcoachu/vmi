@@ -77,7 +77,7 @@ deploy_app <- function() {
 
 # Run deployment
 if (!interactive()) {
-  cat("VMI - Deployment Script\n")
+  cat("CBU - Deployment Script\n")
   cat("==========================================\n")
   success <- deploy_app()
   if (!success) {
