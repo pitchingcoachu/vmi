@@ -6,7 +6,7 @@
 options(repos = c(CRAN = "https://cloud.r-project.org/"))
 options(timeout = 300)
 
-cat("VMI Baseball Analytics - Package Installation\n")
+cat("CBU Baseball Analytics - Package Installation\n")
 cat("=============================================\n")
 
 # Track installation failures
@@ -66,7 +66,7 @@ for (pkg in essential_packages) {
 app_packages <- c(
   "DT",
   "gridExtra",
-  "patchwork", 
+  "patchwork",
   "hexbin",
   "httr2",
   "MASS",
@@ -74,22 +74,23 @@ app_packages <- c(
   "akima",
   "plotly",
   "RCurl",
-  "jsonlite"
+  "jsonlite",
+  "ggiraph"   # now treated as required
 )
+
 
 cat("\nInstalling app-specific packages...\n")
 for (pkg in app_packages) {
   install_package_safe(pkg, critical = TRUE)
 }
-
 # Optional packages (nice to have but not critical)
-optional_packages <- c(
-  "ggiraph"
-)
+optional_packages <- character(0)
 
-cat("\nInstalling optional packages...\n")
-for (pkg in optional_packages) {
-  install_package_safe(pkg, critical = FALSE)
+if (length(optional_packages)) {
+  cat("\nInstalling optional packages...\n")
+  for (pkg in optional_packages) {
+    install_package_safe(pkg, critical = FALSE)
+  }
 }
 
 # Check for critical package failures
