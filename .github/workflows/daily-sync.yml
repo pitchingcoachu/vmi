@@ -1,8 +1,9 @@
-name: Daily VMI Data Sync and Deploy
+name: Daily GCU Data Sync and Deploy
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Run every 6 hours
+    - cron: '0 14 * * *'   # 10:00 AM ET
+    - cron: '0 19 * * *'   # 3:00 PM ET
   workflow_dispatch:  # Allow manual triggering
 
 jobs:
@@ -27,7 +28,20 @@ jobs:
           libxml2-dev \
           libfontconfig1-dev \
           libharfbuzz-dev \
-          libfribidi-dev
+          libfribidi-dev \
+          libfreetype6-dev \
+          libpng-dev \
+          libjpeg-dev \
+          libtiff-dev \
+          libfontconfig1 \
+          libxcb1 \
+          libicu-dev \
+          libcairo2-dev \
+          libgdal-dev \
+          libgeos-dev \
+          libproj-dev \
+          libudunits2-dev
+
         
     - name: Install R packages
       run: Rscript install_packages.R
@@ -40,7 +54,7 @@ jobs:
       run: |
         Rscript -e "rsconnect::setAccountInfo(name='${{ secrets.SHINYAPPS_ACCOUNT }}', token='${{ secrets.SHINYAPPS_TOKEN }}', secret='${{ secrets.SHINYAPPS_SECRET }}')"
         
-    - name: Sync VMI data
+    - name: Sync GCU data
       run: Rscript automated_data_sync.R
         
     - name: Check if data directory exists
@@ -68,7 +82,7 @@ jobs:
         if git diff --staged --quiet; then
           echo "No changes to commit"
         else
-          git commit -m "Auto-update VMI data $(date)"
+          git commit -m "Auto-update GCU data $(date)"
           git pull --rebase origin main
           git push
         fi
