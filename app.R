@@ -3,7 +3,6 @@
 
 library(shiny)
 library(dplyr)
-library(purrr)
 library(DT)
 library(gridExtra)
 library(ggplot2)
@@ -13,6 +12,7 @@ library(hexbin)
 library(ggiraph)
 library(httr2)
 library(MASS)  # for kde2d in heatmaps
+library(digest)
 # --- media uploads (Cloudinary) ---
 # raise upload size if needed (50 MB here)
 options(shiny.maxRequestSize = 50 * 1024^2)
@@ -82,6 +82,8 @@ draw_heat <- function(grid, bins = HEAT_BINS, pal_fun = heat_pal_red,
 
 
 library(curl)  # for curl::form_file
+library(DBI)   # for database operations
+library(RSQLite)  # for SQLite database
 
 # Configure Cloudinary (recommended simple host for images/videos)
 # Create a free account, make an *unsigned upload preset*, then set these:
@@ -94,6 +96,179 @@ if (!nzchar(CLOUDINARY_UPLOAD_PRESET)) CLOUDINARY_UPLOAD_PRESET <- "pcu_notes_un
 
 # helper: coalesce for NULL
 `%||%` <- function(a,b) if (is.null(a)) b else a
+
+get_modifications_db_path <- function() {
+  override <- Sys.getenv("PITCH_MOD_DB_PATH", unset = "")
+  if (nzchar(override)) {
+    path <- path.expand(override)
+    dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+    return(path)
+  }
+  if (file.access(".", 2) == 0) return("pitch_modifications.db")
+  alt <- file.path(tools::R_user_dir("pcu_pitch_dashboard", which = "data"), "pitch_modifications.db")
+  dir.create(dirname(alt), recursive = TRUE, showWarnings = FALSE)
+  alt
+}
+
+get_modifications_export_path <- function() {
+  override <- Sys.getenv("PITCH_MOD_EXPORT_PATH", unset = "")
+  if (nzchar(override)) {
+    path <- path.expand(override)
+    dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+    if (!file.exists(path)) {
+      bundle_seed <- file.path("data", "pitch_type_modifications.csv")
+      if (file.exists(bundle_seed)) {
+        try(file.copy(bundle_seed, path, overwrite = FALSE), silent = TRUE)
+      }
+    }
+    return(path)
+  }
+  file.path("data", "pitch_type_modifications.csv")
+}
+
+compute_pitch_key <- function(df) {
+  if (!nrow(df)) return(character(0))
+  prefer_cols <- c("PitchUID", "PitchGuid", "PitchID", "PitchId", "PitchUIDNext", "b_pitch_guid")
+  for (col in prefer_cols) {
+    if (col %in% names(df)) {
+      vals <- df[[col]]
+      if (!is.null(vals) && any(!is.na(vals) & nzchar(as.character(vals)))) {
+        return(as.character(vals))
+      }
+    }
+  }
+  safe_chr <- function(x) {
+    out <- tryCatch(as.character(x), warning = function(...) "", error = function(...) "")
+    if (!length(out)) return("")
+    out <- out[1]
+    ifelse(is.na(out), "", out)
+  }
+  safe_num <- function(x) {
+    val <- suppressWarnings(as.numeric(x))
+    if (!length(val)) return("")
+    val <- val[1]
+    if (is.na(val)) "" else sprintf("%.3f", round(val, 3))
+  }
+  vapply(seq_len(nrow(df)), function(i) {
+    row <- df[i, , drop = FALSE]
+    parts <- c(
+      safe_chr(row$Pitcher),
+      safe_chr(as.Date(row$Date)),
+      safe_chr(row$SessionType),
+      safe_chr(row$Batter),
+      safe_chr(row$PitchCall),
+      safe_chr(row$PlayResult),
+      safe_chr(row$TaggedPitchType),
+      safe_chr(row$Inning),
+      safe_chr(row$Balls),
+      safe_chr(row$Strikes),
+      safe_num(row$RelSpeed),
+      safe_num(row$InducedVertBreak),
+      safe_num(row$HorzBreak),
+      safe_num(row$Extension),
+      safe_num(row$VertApprAngle),
+      safe_num(row$HorzApprAngle),
+      safe_num(row$PlateLocSide),
+      safe_num(row$PlateLocHeight)
+    )
+    digest::digest(paste(parts, collapse = "|"), algo = "xxhash64", serialize = FALSE)
+  }, character(1))
+}
+
+ensure_pitch_keys <- function(df) {
+  if (!nrow(df)) {
+    if (!"PitchKey" %in% names(df)) df$PitchKey <- character(0)
+    return(df)
+  }
+  if (!"PitchKey" %in% names(df)) {
+    df$PitchKey <- compute_pitch_key(df)
+    return(df)
+  }
+  df$PitchKey <- as.character(df$PitchKey)
+  missing <- is.na(df$PitchKey) | !nzchar(df$PitchKey)
+  if (any(missing)) {
+    df$PitchKey[missing] <- compute_pitch_key(df[missing, , drop = FALSE])
+  }
+  df
+}
+
+attach_pitch_keys_to_mods <- function(mods_df, base_data, tolerance = 0.5) {
+  if (!nrow(mods_df)) {
+    if (!"pitch_key" %in% names(mods_df)) mods_df$pitch_key <- character(0)
+    return(mods_df)
+  }
+  if (is.null(base_data) || !nrow(base_data)) {
+    if (!"pitch_key" %in% names(mods_df)) mods_df$pitch_key <- NA_character_
+    return(mods_df)
+  }
+  mods_df$pitch_key <- as.character(mods_df[["pitch_key"]] %||% NA_character_)
+  need <- is.na(mods_df$pitch_key) | !nzchar(mods_df$pitch_key)
+  if (!any(need)) return(mods_df)
+  base <- ensure_pitch_keys(base_data)
+  tol <- ifelse(is.na(suppressWarnings(as.numeric(tolerance))), 0.5, as.numeric(tolerance))
+  rel_base <- suppressWarnings(as.numeric(base$RelSpeed))
+  hb_base  <- suppressWarnings(as.numeric(base$HorzBreak))
+  ivb_base <- suppressWarnings(as.numeric(base$InducedVertBreak))
+  for (idx in which(need)) {
+    mod <- mods_df[idx, , drop = FALSE]
+    rel_mod <- suppressWarnings(as.numeric(mod$rel_speed))
+    hb_mod  <- suppressWarnings(as.numeric(mod$horz_break))
+    ivb_mod <- suppressWarnings(as.numeric(mod$induced_vert_break))
+    rel_ok <- if (is.na(rel_mod)) rep(TRUE, length(rel_base)) else abs(rel_base - rel_mod) <= tol
+    hb_ok  <- if (is.na(hb_mod))  rep(TRUE, length(hb_base))  else abs(hb_base - hb_mod) <= tol
+    ivb_ok <- if (is.na(ivb_mod)) rep(TRUE, length(ivb_base)) else abs(ivb_base - ivb_mod) <= tol
+    matches <- which(
+      base$Pitcher == mod$pitcher &
+      as.character(base$Date) == as.character(mod$date) &
+      rel_ok & hb_ok & ivb_ok
+    )
+    if (length(matches)) mods_df$pitch_key[idx] <- base$PitchKey[matches[1]]
+  }
+  mods_df
+}
+
+refresh_missing_pitch_keys <- function(con, mods_df, base_data) {
+  if (!nrow(mods_df)) return(mods_df)
+  mods_with_keys <- attach_pitch_keys_to_mods(mods_df, base_data)
+  newly_filled <- which((is.na(mods_df$pitch_key) | !nzchar(mods_df$pitch_key)) & nzchar(mods_with_keys$pitch_key))
+  if (length(newly_filled)) {
+    for (idx in newly_filled) {
+      try(dbExecute(con, "UPDATE modifications SET pitch_key = ? WHERE id = ?", list(mods_with_keys$pitch_key[idx], mods_with_keys$id[idx])), silent = TRUE)
+    }
+  }
+  mods_with_keys
+}
+
+write_modifications_snapshot <- function(con) {
+  export_path <- get_modifications_export_path()
+  if (!nzchar(export_path)) return()
+  mods <- try(dbGetQuery(con, "SELECT * FROM modifications ORDER BY created_at"), silent = TRUE)
+  if (inherits(mods, "try-error") || !nrow(mods)) return()
+  dir_path <- dirname(export_path)
+  if (!dir.exists(dir_path)) {
+    ok <- try(dir.create(dir_path, recursive = TRUE, showWarnings = FALSE), silent = TRUE)
+    if (inherits(ok, "try-error") || !dir.exists(dir_path)) return()
+  }
+  tmp <- tempfile(fileext = ".csv")
+  on.exit(unlink(tmp), add = TRUE)
+  try(readr::write_csv(mods, tmp), silent = TRUE)
+  file.copy(tmp, export_path, overwrite = TRUE, copy.mode = TRUE)
+}
+
+import_modifications_from_export <- function(con, base_data) {
+  export_path <- get_modifications_export_path()
+  if (!file.exists(export_path)) return()
+  mods_csv <- try(readr::read_csv(export_path, show_col_types = FALSE), silent = TRUE)
+  if (inherits(mods_csv, "try-error") || !nrow(mods_csv)) return()
+  mods_csv <- as.data.frame(mods_csv, stringsAsFactors = FALSE)
+  if (!"pitch_key" %in% names(mods_csv)) mods_csv$pitch_key <- NA_character_
+  mods_csv <- attach_pitch_keys_to_mods(mods_csv, base_data)
+  existing <- try(dbGetQuery(con, "SELECT pitch_key FROM modifications"), silent = TRUE)
+  existing_keys <- if (inherits(existing, "try-error")) character(0) else as.character(existing$pitch_key)
+  new_rows <- mods_csv[!(mods_csv$pitch_key %in% existing_keys), , drop = FALSE]
+  if (!nrow(new_rows)) return()
+  dbWriteTable(con, "modifications", new_rows, append = TRUE)
+}
 
 upload_media_cloudinary <- function(path) {
   if (!nzchar(CLOUDINARY_CLOUD_NAME) || !nzchar(CLOUDINARY_UPLOAD_PRESET)) {
@@ -121,6 +296,288 @@ upload_media_cloudinary <- function(path) {
     url  = j$secure_url %||% j$url,
     type = j$resource_type %||% "auto"  # "image" | "video" | "raw"
   )
+}
+
+# ---- Database functions for persistent pitch modifications ----
+
+# Initialize modifications database
+init_modifications_db <- function() {
+  db_path <- get_modifications_db_path()
+  con <- tryCatch(dbConnect(SQLite(), db_path), error = function(e) e)
+  if (inherits(con, "error")) {
+    warning(sprintf("Could not open modifications DB (%s). Pitch edits will only persist in-memory.", conditionMessage(con)))
+    return(db_path)
+  }
+  on.exit(dbDisconnect(con), add = TRUE)
+  dbExecute(con, "
+    CREATE TABLE IF NOT EXISTS modifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pitcher TEXT NOT NULL,
+      date TEXT NOT NULL,
+      rel_speed REAL,
+      horz_break REAL,
+      induced_vert_break REAL,
+      original_pitch_type TEXT,
+      new_pitch_type TEXT NOT NULL,
+      modified_at TEXT NOT NULL,
+      pitch_key TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  ")
+  dbExecute(con, "
+    CREATE INDEX IF NOT EXISTS idx_pitch_lookup ON modifications 
+    (pitcher, date, rel_speed, horz_break, induced_vert_break)
+  ")
+  dbExecute(con, "
+    CREATE INDEX IF NOT EXISTS idx_pitch_key ON modifications (pitch_key)
+  ")
+  base_data <- get0("pitch_data_pitching", ifnotfound = NULL)
+  import_modifications_from_export(con, base_data)
+  mods <- try(dbGetQuery(con, "SELECT * FROM modifications"), silent = TRUE)
+  if (!inherits(mods, "try-error") && nrow(mods)) {
+    refresh_missing_pitch_keys(con, mods, base_data)
+    write_modifications_snapshot(con)
+  }
+  db_path
+}
+
+# Save pitch modifications to database
+save_pitch_modifications_db <- function(selected_pitches, new_type) {
+  db_path <- init_modifications_db()
+  con <- tryCatch(dbConnect(SQLite(), db_path), error = function(e) e)
+  if (inherits(con, "error")) {
+    return(list(success = FALSE, error = paste("Could not open pitch modifications database:", conditionMessage(con))))
+  }
+  on.exit(dbDisconnect(con), add = TRUE)
+  selected_pitches <- ensure_pitch_keys(selected_pitches)
+  new_mods <- data.frame(
+    pitcher = selected_pitches$Pitcher,
+    date = as.character(selected_pitches$Date),
+    rel_speed = suppressWarnings(as.numeric(selected_pitches$RelSpeed)),
+    horz_break = suppressWarnings(as.numeric(selected_pitches$HorzBreak)),
+    induced_vert_break = suppressWarnings(as.numeric(selected_pitches$InducedVertBreak)),
+    original_pitch_type = selected_pitches$TaggedPitchType,
+    new_pitch_type = new_type,
+    modified_at = as.character(Sys.time()),
+    pitch_key = as.character(selected_pitches$PitchKey),
+    stringsAsFactors = FALSE
+  )
+  new_mods$pitch_key[is.na(new_mods$pitch_key)] <- ""
+  new_mods <- new_mods[nzchar(new_mods$pitch_key), , drop = FALSE]
+  if (!nrow(new_mods)) {
+    return(list(success = FALSE, error = "No pitch identifiers available for the selected rows."))
+  }
+  res <- tryCatch({
+    dbExecute(con, "BEGIN IMMEDIATE")
+    for (i in seq_len(nrow(new_mods))) {
+      dbExecute(con, "DELETE FROM modifications WHERE pitch_key = ?", list(new_mods$pitch_key[i]))
+    }
+    dbWriteTable(con, "modifications", new_mods, append = TRUE)
+    dbExecute(con, "COMMIT")
+    write_modifications_snapshot(con)
+    list(success = TRUE, count = nrow(new_mods))
+  }, error = function(e) {
+    try(dbExecute(con, "ROLLBACK"), silent = TRUE)
+    list(success = FALSE, error = conditionMessage(e))
+  })
+  res
+}
+
+# Enhanced: Load and apply modifications from database with better matching
+load_pitch_modifications_db <- function(pitch_data, verbose = TRUE) {
+  db_path <- init_modifications_db()
+  
+  if (!file.exists(db_path)) {
+    return(list(
+      data = pitch_data %>% mutate(original_row_id = row_number()),
+      applied_count = 0,
+      total_modifications = 0
+    ))
+  }
+  
+  con <- tryCatch(dbConnect(SQLite(), db_path), error = function(e) e)
+  if (inherits(con, "error")) {
+    warning(sprintf("Could not open modifications DB while loading (%s)", conditionMessage(con)))
+    return(list(
+      data = ensure_pitch_keys(pitch_data) %>% mutate(original_row_id = row_number()),
+      applied_count = 0,
+      total_modifications = 0
+    ))
+  }
+  on.exit(dbDisconnect(con), add = TRUE)
+  
+  tryCatch({
+    # Get all modifications
+    mods <- dbGetQuery(con, "SELECT * FROM modifications ORDER BY created_at")
+    base_data <- ensure_pitch_keys(pitch_data)
+    mods <- refresh_missing_pitch_keys(con, mods, base_data)
+    
+    if (nrow(mods) == 0) {
+      return(list(
+        data = base_data %>% mutate(original_row_id = row_number()),
+        applied_count = 0,
+        total_modifications = 0
+      ))
+    }
+    
+    temp_data <- base_data %>% mutate(original_row_id = row_number())
+    
+    # Apply modifications with enhanced matching
+    modifications_applied <- 0
+    modifications_not_found <- 0
+    
+    for (i in 1:nrow(mods)) {
+      mod <- mods[i, ]
+      
+      # Primary matching strategy: exact match on multiple fields
+      match_idx <- integer(0)
+      if ("PitchKey" %in% names(temp_data) && !is.na(mod$pitch_key) && nzchar(mod$pitch_key)) {
+        match_idx <- which(temp_data$PitchKey == mod$pitch_key)
+      }
+      if (!length(match_idx)) {
+        match_idx <- which(
+          temp_data$Pitcher == mod$pitcher &
+          temp_data$Date == mod$date &
+          abs(temp_data$RelSpeed - mod$rel_speed) < 0.1 &
+          abs(temp_data$HorzBreak - mod$horz_break) < 0.1 &
+          abs(temp_data$InducedVertBreak - mod$induced_vert_break) < 0.1
+        )
+      }
+      
+      # Fallback matching: if exact match fails, try looser criteria
+      if (length(match_idx) == 0) {
+        match_idx <- which(
+          temp_data$Pitcher == mod$pitcher &
+          temp_data$Date == mod$date &
+          abs(temp_data$RelSpeed - mod$rel_speed) < 0.5  # Slightly looser tolerance
+        )
+      }
+      
+      if (length(match_idx) > 0) {
+        # Apply modification to all matching rows (handles duplicate PitchKey entries)
+        temp_data$TaggedPitchType[match_idx] <- mod$new_pitch_type
+        modifications_applied <- modifications_applied + 1
+        
+        if (verbose) {
+          cat(sprintf("Applied: %s on %s - %s -> %s\n", 
+                     mod$pitcher, mod$date, mod$original_pitch_type, mod$new_pitch_type))
+        }
+      } else {
+        modifications_not_found <- modifications_not_found + 1
+        if (verbose) {
+          cat(sprintf("Could not find pitch to modify: %s on %s (%.1f mph)\n", 
+                     mod$pitcher, mod$date, mod$rel_speed))
+        }
+      }
+    }
+    
+    if (verbose && modifications_applied > 0) {
+      message(sprintf("Applied %d of %d stored pitch type modifications", 
+                     modifications_applied, nrow(mods)))
+      if (modifications_not_found > 0) {
+        message(sprintf("Warning: %d modifications could not be applied (pitches not found)", 
+                       modifications_not_found))
+      }
+    }
+    
+    return(list(
+      data = temp_data,
+      applied_count = modifications_applied,
+      total_modifications = nrow(mods)
+    ))
+    
+  }, finally = {
+    dbDisconnect(con)
+  })
+}
+
+# Function to check if data has been updated since last modification load
+check_data_freshness <- function() {
+  # Check for new_data_flag.txt which gets created by automated_data_sync.R when new data arrives
+  flag_file <- file.path("data", "new_data_flag.txt")
+  mod_state_file <- "modification_state.txt"
+  
+  if (file.exists(flag_file)) {
+    # New data flag exists - check if we've already processed it
+    flag_time <- file.info(flag_file)$mtime
+    
+    if (!file.exists(mod_state_file)) {
+      # First time - create state file and return TRUE
+      writeLines(as.character(flag_time), mod_state_file)
+      file.remove(flag_file)  # Remove the flag so we don't keep reprocessing
+      return(TRUE)
+    }
+    
+    last_processed_time <- as.POSIXct(readLines(mod_state_file)[1])
+    
+    if (flag_time > last_processed_time) {
+      # New data has arrived since we last processed
+      writeLines(as.character(flag_time), mod_state_file)
+      file.remove(flag_file)  # Remove the flag
+      return(TRUE)
+    }
+  }
+  
+  # Also check the traditional last_sync.txt approach as backup
+  sync_file <- file.path("data", "last_sync.txt")
+  if (!file.exists(sync_file)) {
+    return(FALSE)  # No sync file means no data sync has occurred
+  }
+  
+  sync_time <- file.info(sync_file)$mtime
+  
+  if (!file.exists(mod_state_file)) {
+    # First time - create state file and return TRUE to trigger reload
+    writeLines(as.character(sync_time), mod_state_file)
+    return(TRUE)
+  }
+  
+  last_mod_time <- as.POSIXct(readLines(mod_state_file)[1])
+  
+  if (sync_time > last_mod_time) {
+    # Data has been updated since modifications were last applied
+    writeLines(as.character(sync_time), mod_state_file)
+    return(TRUE)
+  }
+  
+  return(FALSE)
+}
+
+# Function to get modification statistics
+get_modification_stats <- function() {
+  db_path <- "pitch_modifications.db"
+  
+  if (!file.exists(db_path)) {
+    return(list(total = 0, by_player = data.frame(), recent = data.frame()))
+  }
+  
+  con <- dbConnect(SQLite(), db_path)
+  
+  tryCatch({
+    # Get total count
+    total <- dbGetQuery(con, "SELECT COUNT(*) as count FROM modifications")$count
+    
+    # Get count by player
+    by_player <- dbGetQuery(con, "
+      SELECT pitcher, COUNT(*) as modifications 
+      FROM modifications 
+      GROUP BY pitcher 
+      ORDER BY modifications DESC
+    ")
+    
+    # Get recent modifications
+    recent <- dbGetQuery(con, "
+      SELECT pitcher, date, original_pitch_type, new_pitch_type, modified_at 
+      FROM modifications 
+      ORDER BY created_at DESC 
+      LIMIT 10
+    ")
+    
+    return(list(total = total, by_player = by_player, recent = recent))
+    
+  }, finally = {
+    dbDisconnect(con)
+  })
 }
 
 
@@ -458,7 +915,7 @@ datatable_with_colvis <- function(df, lock = character(0), remember = TRUE, defa
 stuff_cols    <- c("Pitch","#","Velo","Max","IVB","HB","rTilt","bTilt", "SpinEff","Spin","Height","Side","Ext","VAA","HAA","Stuff+")
 process_cols  <- c("Pitch","#","BF","Usage","InZone%","Comp%","Strike%","FPS%","E+A%","Whiff%","CSW%","EV","LA","Ctrl+","QP+")
 results_cols  <- c("Pitch","#","BF","IP","K%","BB%","BABIP","GB%","Barrel%","AVG","SLG","xWOBA","xISO","FIP","WHIP","Pitching+")
-banny_cols    <- c("Pitch","Usage","Strike%","InZone%","Comp%","Velo","IVB","HB","Stuff+","QP+","Pitching+")
+banny_cols    <- c("Pitch","Usage","Strike%","InZone%","Comp%","Velo","Max","IVB","HB","Stuff+","QP+","Pitching+")
 perf_cols     <- c("Pitch","#","BF","Usage","InZone%","Comp%","Strike%","FPS%","E+A%","K%","BB%","Whiff%","CSW%","EV","LA","Ctrl+","QP+","Pitching+")
 # all_table_cols will auto-include QP+ via the union
 
@@ -746,6 +1203,7 @@ make_hover_tt <- function(df) {
     "<br>Velo: ", ifelse(is.na(df$RelSpeed), "", sprintf("%.1f mph", df$RelSpeed)),
     "<br>IVB: " , ifelse(is.na(df$InducedVertBreak), "", sprintf("%.1f in", df$InducedVertBreak)),
     "<br>HB: "  , ifelse(is.na(df$HorzBreak), "", sprintf("%.1f in", df$HorzBreak)),
+    "<br>Stuff+: ", ifelse(is.na(df$`Stuff+`), "", sprintf("%.1f", df$`Stuff+`)),
     "<br>In Zone: ", inzone_label(df$PlateLocSide, df$PlateLocHeight)
   )
 }
@@ -833,8 +1291,8 @@ pitch_weights_si <- tibble(
                       "Cutter","Slider","Sweeper","Curveball",
                       "ChangeUp","Splitter"),
   w_vel = c(0.6, 0.5, 0.5, 0.4, 0.3, 0.5, 0.2, 0.1),
-  w_ivb = c(0.3, 0.3, 0.2, 0.4, 0.1, 0.5, 0.6, 0.85),
-  w_hb  = c(0.1, 0.2, 0.3, 0.2, 0.6, 0.0, 0.2, 0.05)
+  w_ivb = c(0.3, 0.3, 0.2, 0.4, 0.1, 0.5, 0.7, 0.85),
+  w_hb  = c(0.1, 0.2, 0.3, 0.2, 0.6, 0.0, 0.1, 0.05)
 )
 
 # ---- Simplified Stuff+ Helper (vectorized, RelHeight-based FB/SI) ----
@@ -844,11 +1302,11 @@ compute_stuff_simple <- function(df, base_type, level) {
   
   # prepare data and join weights
   df2 <- df %>%
-    mutate(
+    dplyr::mutate(
       TaggedPitchType = as.character(TaggedPitchType),
       HB_adj = ifelse(PitcherThrows == "Left", HorzBreak, -HorzBreak)
     ) %>%
-    left_join(weight_tbl, by = "TaggedPitchType")
+    dplyr::left_join(weight_tbl, by = "TaggedPitchType")
   
   # velocity baselines
   base_vel <- mean(df2$RelSpeed[df2$TaggedPitchType == base_type], na.rm = TRUE)
@@ -1653,6 +2111,8 @@ pitch_data <- pitch_data %>%
   dplyr::filter(!is.na(TaggedPitchType) & tolower(TaggedPitchType) != "undefined") %>%
   force_pitch_levels()
 
+pitch_data <- ensure_pitch_keys(pitch_data)
+
 # Friendly load message
 counts <- table(pitch_data$SessionType, useNA = "no")
 bcount <- if ("Bullpen" %in% names(counts)) counts[["Bullpen"]] else 0
@@ -1758,6 +2218,8 @@ pitch_data_pitching <- pitch_data_pitching %>%
                 .norm_disp = norm_name_ci(.disp)) %>%
   dplyr::filter(.norm_raw %in% allowed_norm | .norm_disp %in% allowed_norm) %>%
   dplyr::select(-.disp, -.norm_raw, -.norm_disp)
+
+pitch_data_pitching <- ensure_pitch_keys(pitch_data_pitching)
 
 # Name map for Pitching UI (restricted to the filtered set)
 raw_names_p <- sort(unique(pitch_data_pitching$Pitcher))
@@ -2192,6 +2654,33 @@ pitch_ui <- function(show_header = FALSE) {
           column(6, numericInput("pcMin", "Pitch Count Min:", value = NA, min = 1)),
           column(6, numericInput("pcMax", "Pitch Count Max:", value = NA, min = 1))
         ),
+        
+        # Data refresh section
+        hr(),
+        div(
+          style = "text-align:center; margin: 10px 0;",
+          actionButton(
+            "refreshModifications", 
+            "Refresh Pitch Edits",
+            icon = icon("refresh"),
+            class = "btn-info btn-sm",
+            style = "margin-bottom: 5px;"
+          ),
+          br(),
+          downloadButton(
+            "downloadPitchMods",
+            "Download Pitch Edits",
+            class = "btn-default btn-sm",
+            style = "margin-top: 5px;"
+          ),
+          br(),
+          div(
+            id = "modificationStatus",
+            style = "font-size: 12px; color: #666; margin-top: 5px;",
+            textOutput("modificationStatusText")
+          )
+        ),
+        
         width = 3,
         class = "sidebar"
       ),
@@ -2609,11 +3098,11 @@ mod_hit_server <- function(id, is_active = shiny::reactive(TRUE)) {
     
     # ----- TEAM FILTER (LSU only) -----
     # keep your current default if you want
-    TEAM_CODE <- "GRA_CAN"
-    
+    TEAM_CODE <- "VIR_KEY"    
     # Map team-code synonyms (extend this list as needed)
     TEAM_SYNONYMS <- list(
-      GRA_CAN = c("GRA_CAN")
+      VIR_KEY = c("VIR_KEY", "VMI_KEY"),
+      VMI_KEY = c("VIR_KEY", "VMI_KEY")
     )
     
     codes_for <- function(code) {
@@ -5420,11 +5909,11 @@ mod_leader_server <- function(id, is_active = shiny::reactive(TRUE)) {
     ns <- session$ns
     
     # ---------- constants ----------
-    TEAM_CODE <- "GRA_CAN"
-    
+    TEAM_CODE <- "VIR_KEY"    
     # Map team-code synonyms (extend this list as needed)
     TEAM_SYNONYMS <- list(
-      GRA_CAN = c("GRA_CAN")
+      VIR_KEY = c("VIR_KEY", "VMI_KEY"),
+      VMI_KEY = c("VIR_KEY", "VMI_KEY")
     )
     
     # ---------- small helpers ----------
@@ -7657,7 +8146,7 @@ player_plans_ui <- function() {
 }
 
 
-  ui <- tagList(
+ui <- tagList(
     # --- Custom navbar colors & styling ---
     tags$head(
       tags$style(HTML("
@@ -7797,35 +8286,109 @@ $(document).off('click.pcuOpenMedia', 'a.open-media')
 # Server logic
 server <- function(input, output, session) {
   
+  # Initialize database on startup
+  init_modifications_db()
+  
   # Reactive value to store modified pitch data with edits persisted
   modified_pitch_data <- reactiveVal()
   
-  # Load existing modifications if they exist
-  modifications_file <- "pitch_modifications.rds"
-  if (file.exists(modifications_file)) {
-    stored_mods <- readRDS(modifications_file)
-    temp_data <- pitch_data_pitching %>%
-      mutate(original_row_id = row_number())  # Add unique identifier
-    # Apply stored modifications
-    for (i in seq_len(nrow(stored_mods))) {
-      mod <- stored_mods[i, ]
-      # Find matching rows using multiple fields for robustness
-      match_idx <- which(
-        temp_data$Pitcher == mod$Pitcher &
-        temp_data$Date == mod$Date &
-        abs(temp_data$RelSpeed - (mod$RelSpeed %||% 0)) < 0.1 &
-        abs(temp_data$HorzBreak - (mod$HorzBreak %||% 0)) < 0.1 &
-        abs(temp_data$InducedVertBreak - (mod$InducedVertBreak %||% 0)) < 0.1
-      )
-      if (length(match_idx) > 0) {
-        # If multiple matches, take the first one
-        temp_data$TaggedPitchType[match_idx[1]] <- mod$new_pitch_type
+  # Reactive value to track modification statistics
+  modification_stats <- reactiveVal(list(applied_count = 0, total_modifications = 0))
+  
+  # Function to load modifications with feedback
+  load_modifications <- function(force_reload = FALSE, verbose = TRUE) {
+    if (force_reload || check_data_freshness()) {
+      if (verbose) {
+        showNotification("Checking for stored pitch type modifications...", 
+                        type = "message", duration = 2)
+      }
+      
+      result <- load_pitch_modifications_db(pitch_data_pitching, verbose = verbose)
+      modified_pitch_data(result$data)
+      modification_stats(list(
+        applied_count = result$applied_count,
+        total_modifications = result$total_modifications
+      ))
+      
+      if (verbose && result$applied_count > 0) {
+        showNotification(
+          sprintf("Applied %d of %d stored pitch type modifications", 
+                 result$applied_count, result$total_modifications),
+          type = "message", duration = 5
+        )
+      } else if (verbose && result$total_modifications > 0) {
+        showNotification(
+          sprintf("Warning: %d stored modifications could not be applied (pitches not found)", 
+                 result$total_modifications - result$applied_count),
+          type = "warning", duration = 5
+        )
+      }
+    } else {
+      # No new data, just load normally if not already loaded
+      current_data <- tryCatch(modified_pitch_data(), error = function(e) NULL)
+      if (is.null(current_data)) {
+        result <- load_pitch_modifications_db(pitch_data_pitching, verbose = FALSE)
+        modified_pitch_data(result$data)
+        modification_stats(list(
+          applied_count = result$applied_count,
+          total_modifications = result$total_modifications
+        ))
       }
     }
-    modified_pitch_data(temp_data)
-  } else {
-    modified_pitch_data(pitch_data_pitching %>% mutate(original_row_id = row_number()))
   }
+  
+  # Load modifications on startup
+  load_modifications(force_reload = FALSE, verbose = TRUE)
+  
+  # Add a reactive timer to check for data updates every 30 seconds
+  autoCheck <- reactiveTimer(30000)  # 30 seconds
+  
+  observe({
+    autoCheck()
+    load_modifications(force_reload = FALSE, verbose = FALSE)
+  })
+  
+  # Manual refresh button observer
+  observeEvent(input$refreshModifications, {
+    showNotification("Manually refreshing pitch type modifications...", 
+                    type = "message", duration = 2)
+    load_modifications(force_reload = TRUE, verbose = TRUE)
+  })
+
+  output$downloadPitchMods <- downloadHandler(
+    filename = function() paste0("pitch_type_modifications_", format(Sys.Date(), "%Y%m%d"), ".csv"),
+    content = function(file) {
+      db_path <- init_modifications_db()
+      con <- tryCatch(dbConnect(SQLite(), db_path), error = function(e) e)
+      if (inherits(con, "error")) {
+        export_path <- get_modifications_export_path()
+        if (file.exists(export_path)) {
+          file.copy(export_path, file, overwrite = TRUE)
+        } else {
+          readr::write_csv(data.frame(message = "No pitch edits saved yet"), file)
+        }
+        return()
+      }
+      on.exit(dbDisconnect(con), add = TRUE)
+      mods <- try(dbGetQuery(con, "SELECT * FROM modifications ORDER BY created_at"), silent = TRUE)
+      if (inherits(mods, "try-error") || !nrow(mods)) {
+        readr::write_csv(data.frame(message = "No pitch edits saved yet"), file)
+      } else {
+        readr::write_csv(mods, file)
+      }
+    }
+  )
+  
+  # Status text output
+  output$modificationStatusText <- renderText({
+    stats <- modification_stats()
+    if (stats$total_modifications > 0) {
+      sprintf("%d edits stored, %d applied", 
+             stats$total_modifications, stats$applied_count)
+    } else {
+      "No stored edits"
+    }
+  })
   
   session_label_from <- function(df) {
     s <- unique(na.omit(as.character(df$SessionType)))
@@ -7893,7 +8456,7 @@ server <- function(input, output, session) {
     }
   }, ignoreInit = TRUE)
   
-  admin_emails <- c("jgaynor@pitchingcoachu.com", "crosbyac@vmi.edu")
+admin_emails <- c("jgaynor@pitchingcoachu.com", "crosbyac@vmi.edu")
   # helper to normalize email
   norm_email <- function(x) tolower(trimws(x))
   
@@ -10784,28 +11347,49 @@ server <- function(input, output, session) {
     
     # Update the modified pitch data
     current_data <- modified_pitch_data()
+    if (is.null(current_data)) current_data <- pitch_data_pitching
+    updated_data <- current_data
     
     # Update each selected pitch using multiple matching criteria
     for (i in 1:nrow(selected_pitches)) {
       p <- selected_pitches[i, ]
-      # Find matching rows using multiple fields for robustness
       match_idx <- which(
-        current_data$Pitcher == p$Pitcher &
-        current_data$Date == p$Date &
-        abs(current_data$RelSpeed - (p$RelSpeed %||% 0)) < 0.1 &
-        abs(current_data$HorzBreak - (p$HorzBreak %||% 0)) < 0.1 &
-        abs(current_data$InducedVertBreak - (p$InducedVertBreak %||% 0)) < 0.1
+        updated_data$Pitcher == p$Pitcher &
+        updated_data$Date == p$Date &
+        abs(updated_data$RelSpeed - (p$RelSpeed %||% 0)) < 0.1 &
+        abs(updated_data$HorzBreak - (p$HorzBreak %||% 0)) < 0.1 &
+        abs(updated_data$InducedVertBreak - (p$InducedVertBreak %||% 0)) < 0.1
       )
       if (length(match_idx) > 0) {
-        current_data$TaggedPitchType[match_idx[1]] <- new_type
+        updated_data$TaggedPitchType[match_idx[1]] <- new_type
       }
     }
     
-    # Update reactive value
-    modified_pitch_data(current_data)
+    # Save modifications to database
+    save_result <- save_pitch_modifications_db(selected_pitches, new_type)
+    if (!isTRUE(save_result$success)) {
+      showNotification(
+        paste0("Could not store pitch type edits: ", save_result$error %||% "unknown error"),
+        type = "error", duration = 8
+      )
+      return()
+    }
     
-    # Save modifications to file
-    save_pitch_modifications(selected_pitches, new_type)
+    # Update reactive value only after successful persistence
+    modified_pitch_data(updated_data)
+    
+    # Update modification stats
+    result <- load_pitch_modifications_db(pitch_data_pitching, verbose = FALSE)
+    modification_stats(list(
+      applied_count = result$applied_count,
+      total_modifications = result$total_modifications
+    ))
+    
+    saved_count <- save_result$count %||% nrow(selected_pitches)
+    showNotification(
+      sprintf("Saved %d pitch type modifications", saved_count),
+      type = "message", duration = 3
+    )
     
     removeModal()
     session$userData$selected_for_edit <- NULL
@@ -10820,84 +11404,53 @@ server <- function(input, output, session) {
     
     # Update the modified pitch data
     current_data <- modified_pitch_data()
+    if (is.null(current_data)) current_data <- pitch_data_pitching
+    updated_data <- current_data
     
     # Update each selected pitch using multiple matching criteria
     for (i in 1:nrow(selected_pitches)) {
       p <- selected_pitches[i, ]
-      # Find matching rows using multiple fields for robustness
       match_idx <- which(
-        current_data$Pitcher == p$Pitcher &
-        current_data$Date == p$Date &
-        abs(current_data$RelSpeed - (p$RelSpeed %||% 0)) < 0.1 &
-        abs(current_data$HorzBreak - (p$HorzBreak %||% 0)) < 0.1 &
-        abs(current_data$InducedVertBreak - (p$InducedVertBreak %||% 0)) < 0.1
+        updated_data$Pitcher == p$Pitcher &
+        updated_data$Date == p$Date &
+        abs(updated_data$RelSpeed - (p$RelSpeed %||% 0)) < 0.1 &
+        abs(updated_data$HorzBreak - (p$HorzBreak %||% 0)) < 0.1 &
+        abs(updated_data$InducedVertBreak - (p$InducedVertBreak %||% 0)) < 0.1
       )
       if (length(match_idx) > 0) {
-        current_data$TaggedPitchType[match_idx[1]] <- new_type
+        updated_data$TaggedPitchType[match_idx[1]] <- new_type
       }
     }
     
-    # Update reactive value
-    modified_pitch_data(current_data)
+    # Save modifications to database
+    save_result <- save_pitch_modifications_db(selected_pitches, new_type)
+    if (!isTRUE(save_result$success)) {
+      showNotification(
+        paste0("Could not store pitch type edits: ", save_result$error %||% "unknown error"),
+        type = "error", duration = 8
+      )
+      return()
+    }
     
-    # Save modifications to file
-    save_pitch_modifications(selected_pitches, new_type)
+    # Update reactive value only after successful persistence
+    modified_pitch_data(updated_data)
+    
+    # Update modification stats
+    result <- load_pitch_modifications_db(pitch_data_pitching, verbose = FALSE)
+    modification_stats(list(
+      applied_count = result$applied_count,
+      total_modifications = result$total_modifications
+    ))
+    
+    saved_count <- save_result$count %||% nrow(selected_pitches)
+    showNotification(
+      sprintf("Saved %d pitch type modifications", saved_count),
+      type = "message", duration = 3
+    )
     
     removeModal()
     session$userData$selected_for_edit_summary <- NULL
   })
-  
-  # Helper function to save modifications
-  save_pitch_modifications <- function(selected_pitches, new_type) {
-    modifications_file <- "pitch_modifications.rds"
-    
-    # Load existing modifications
-    if (file.exists(modifications_file)) {
-      stored_mods <- readRDS(modifications_file)
-    } else {
-      stored_mods <- data.frame(
-        Pitcher = character(0),
-        Date = as.Date(character(0)),
-        RelSpeed = numeric(0),
-        HorzBreak = numeric(0),
-        InducedVertBreak = numeric(0),
-        original_pitch_type = character(0),
-        new_pitch_type = character(0),
-        modified_at = as.POSIXct(character(0)),
-        stringsAsFactors = FALSE
-      )
-    }
-    
-    # Add new modifications
-    new_mods <- data.frame(
-      Pitcher = selected_pitches$Pitcher,
-      Date = selected_pitches$Date,
-      RelSpeed = selected_pitches$RelSpeed %||% 0,
-      HorzBreak = selected_pitches$HorzBreak %||% 0,
-      InducedVertBreak = selected_pitches$InducedVertBreak %||% 0,
-      original_pitch_type = selected_pitches$TaggedPitchType,
-      new_pitch_type = new_type,
-      modified_at = Sys.time(),
-      stringsAsFactors = FALSE
-    )
-    
-    # Remove any existing modifications for the same pitches (using multiple field matching)
-    for (i in 1:nrow(new_mods)) {
-      stored_mods <- stored_mods[!(
-        stored_mods$Pitcher == new_mods$Pitcher[i] &
-        stored_mods$Date == new_mods$Date[i] &
-        abs(stored_mods$RelSpeed - new_mods$RelSpeed[i]) < 0.1 &
-        abs(stored_mods$HorzBreak - new_mods$HorzBreak[i]) < 0.1 &
-        abs(stored_mods$InducedVertBreak - new_mods$InducedVertBreak[i]) < 0.1
-      ), ]
-    }
-    
-    # Combine and save
-    all_mods <- rbind(stored_mods, new_mods)
-    saveRDS(all_mods, modifications_file)
-    
-    message(sprintf("Saved %d pitch type modifications", nrow(new_mods)))
-  }
   
   # Velocity Plot
   # Helper: pick the first existing column name from a preference list
@@ -12020,7 +12573,7 @@ server <- function(input, output, session) {
         # Team synonyms for LSU
         codes_for <- function(code) {
           TEAM_SYNONYMS <- list(
-            GRA_CAN = c("GRA_CAN")
+            VIR_KEY = c("VIR_KEY", "VMI_KEY")
           )
           if (code %in% names(TEAM_SYNONYMS)) TEAM_SYNONYMS[[code]] else code
         }
@@ -12035,7 +12588,7 @@ server <- function(input, output, session) {
         # Team synonyms for LSU
         codes_for <- function(code) {
           TEAM_SYNONYMS <- list(
-            GRA_CAN = c("GRA_CAN")
+            VIR_KEY = c("VIR_KEY", "VMI_KEY")
           )
           if (code %in% names(TEAM_SYNONYMS)) TEAM_SYNONYMS[[code]] else code
         }
@@ -12212,7 +12765,7 @@ server <- function(input, output, session) {
         # Team synonyms for LSU
         codes_for <- function(code) {
           TEAM_SYNONYMS <- list(
-            GRA_CAN = c("GRA_CAN")
+            VIR_KEY = c("VIR_KEY", "VMI_KEY")
           )
           if (code %in% names(TEAM_SYNONYMS)) TEAM_SYNONYMS[[code]] else code
         }
