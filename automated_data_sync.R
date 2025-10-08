@@ -1,7 +1,3 @@
-# automated_data_sync.R
-# VMI Baseball Data Automation Script
-# Syncs data from TrackMan FTP, filters for VMI only
-
 library(RCurl)
 library(readr)
 library(dplyr)
@@ -132,7 +128,7 @@ is_date_in_range <- function(file_path) {
   file_date <- as.Date(paste(date_match[2], date_match[3], date_match[4], sep = "-"))
   
   # Start date: August 1, 2025 (nothing before this)
-  start_date <- as.Date("2025-08-01")
+  start_date <- as.Date("2025-10-03")
   
   # Include all data from August 1, 2025 onwards (no future year restrictions)
   return(file_date >= start_date)
@@ -335,8 +331,13 @@ main_sync <- function() {
     deduplicate_files()
   }
   
-  # Update last sync timestamp
+  # Update last sync timestamp and modification notification
   writeLines(as.character(Sys.time()), file.path(LOCAL_DATA_DIR, "last_sync.txt"))
+  
+  # Create a flag file to indicate new data is available
+  if (practice_updated || v3_updated) {
+    writeLines(as.character(Sys.time()), file.path(LOCAL_DATA_DIR, "new_data_flag.txt"))
+  }
   
   # Return TRUE if any data was updated
   return(practice_updated || v3_updated)
