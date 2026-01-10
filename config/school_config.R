@@ -112,8 +112,8 @@ school_config <- list(
     "crosbyac@vmi.edu"
   ),
   notes_api = list(
-    base_url = "https://script.google.com/macros/s/AKfycby8_RuLj5hKxi129ru32cpEojVimffD2msCSl-I9r9a1LfZe9Ht-yLPbiDHVatm48g/exec",
-    token = "OSUbaseball"
+    base_url = "https://script.google.com/macros/s/AKfycbxE-gkSNBlnEmwf2VZVEkYlZ5YcsonF-Ap7A4v6y3HuaxPB4ikFe6Pc3HoEQ3UYstPkmw/exec",
+    token = "vmibaseball"
   ),
   extra = list(
     school_name = "VMI",
