@@ -1,33 +1,27 @@
 # School-specific overrides for the shared app.
 # Copy this file to another repo and keep the same structure when you need to customize colors, logos, APIs, etc.
 school_config <- list(
-  team_code = "OSU",
+  team_code = "VMI",
   # Player filters
   allowed_pitchers = c(
-    "Lee, Aidan",
-    "Limas, Jacob",
-    "Higginbottom, Elijah",
-    "Cunnings, Cam",
-    "Moeller, Luke",
-    "Smith, Jace",
-    "Frey, Chase",
-    "Ahern, Garrett",
-    "McGuire, Tommy",
-    "Robb, Nicholas",
-    "Guerrero, JT",
-    "Gregory, Billy",
-    "Penzkover, Gunnar",
-    "Lewis, JT",
-    "Kiemele, Cody",
-    "Cohen, Andrew",
-    "Lyon, Andrew",
-    "Johns, Tanner",
-    "Toney, Brock",
-    "Sloan, Landon",
-    "Key, Chance",
-    "Orr, Dillon",
-    "Yates, Zach",
-    "New, Cody"
+  "Jones, Andrew",
+  "Driscoll, Clark",
+  "Biernot, Gavin",
+  "Sipe, Hunter",
+  "Douthat, Jim",
+  "Spiegel, Justin",
+  "Williamson, Nolan",
+  "Riley, Owen",
+  "Dhein, Peyton",
+  "Velasquez, Roberto",
+  "Taylor, Carson",
+  "Tyndall, Eli",
+  "Ahrens, Gary",
+  "Chevalier, George",
+  "Melescu, Miles",
+  "Lafine, Noah",
+  "Monroe, Trace",
+  "Bassett, Tyler"
   ),
   allowed_hitters = c(
     "Wentworth, TP",
@@ -113,23 +107,16 @@ school_config <- list(
     background_secondary= "#e8ecf1"   # the matching secondary background tone
     
   ),
-  logo = "OSUlogo.png",
+  logo = "VMIlogo.png",
   coaches_emails = c(
-    "Blake.hawksworth@okstate.edu",
-    "Payton.stevens@okstate.edu",
-    "Trey.cobb@okstate.edu",
-    "jared.s.gaynor@gmail.com",
-    "Victor.Romero@okstate.edu",
-    "J.Holliday@okstate.edu",
-    "Mark.Ginther@okstate.edu",
-    "hub.roberts@okstate.edu"
+    "crosbyac@vmi.edu"
   ),
   notes_api = list(
     base_url = "https://script.google.com/macros/s/AKfycby8_RuLj5hKxi129ru32cpEojVimffD2msCSl-I9r9a1LfZe9Ht-yLPbiDHVatm48g/exec",
     token = "OSUbaseball"
   ),
   extra = list(
-    school_name = "Oklahoma State",
+    school_name = "VMI",
     ftp_folder = "trackman",
     cloudinary_folder = "trackman"
   )
