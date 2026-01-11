@@ -1,13 +1,23 @@
+# Enhanced automated_data_sync.R
+# This version creates a flag file when new data is synced, 
+# which helps the app detect when to reapply pitch type modifications
+
+# Copy this content to your automated_data_sync.R file
+
 library(RCurl)
 library(readr)
 library(dplyr)
 library(lubridate)
 library(stringr)
 
+# Load CSV filtering utilities
+source("csv_filter_utils.R")
 # FTP credentials
 FTP_HOST <- "ftp.trackmanbaseball.com"
 FTP_USER <- "VMI"
 FTP_PASS <- "q7MvFhmAEN"
+# When passwords contain special characters like @ or %, don't embed them in the URL.
+FTP_USERPWD <- paste0(FTP_USER, ":", FTP_PASS)
 
 # Local data directories
 LOCAL_DATA_DIR      <- "data/"
@@ -21,9 +31,9 @@ dir.create(LOCAL_V3_DIR, recursive = TRUE, showWarnings = FALSE)
 
 # Function to list files in FTP directory
 list_ftp_files <- function(ftp_path) {
-  url <- paste0("ftp://", FTP_USER, ":", FTP_PASS, "@", FTP_HOST, ftp_path)
+  url <- paste0("ftp://", FTP_HOST, ftp_path)
   tryCatch({
-    files <- getURL(url, ftp.use.epsv = FALSE, dirlistonly = TRUE)
+    files <- getURL(url, userpwd = FTP_USERPWD, ftp.use.epsv = FALSE, dirlistonly = TRUE)
     strsplit(files, "\n")[[1]]
   }, error = function(e) {
     cat("Error listing files in", ftp_path, ":", e$message, "\n")
@@ -33,18 +43,24 @@ list_ftp_files <- function(ftp_path) {
 
 # Function to download CSV file (no filtering - app will handle filtering)
 download_csv <- function(remote_file, local_file) {
+  # Check if this file should be excluded
+  filename <- basename(remote_file)
+  if (should_exclude_csv(filename)) {
+    return(FALSE)
+  }
   # Skip if file already exists (incremental sync)
   if (file.exists(local_file)) {
     cat("Skipping existing file:", basename(local_file), "\n")
     return(FALSE)  # Return FALSE so we don't count it as newly downloaded
   }
   
-  url <- paste0("ftp://", FTP_USER, ":", FTP_PASS, "@", FTP_HOST, remote_file)
+  url <- paste0("ftp://", FTP_HOST, remote_file)
   
   tryCatch({
-    # Download file to temporary location
+    # Download file to temporary location using RCurl with proper credentials
     temp_file <- tempfile(fileext = ".csv")
-    download.file(url, temp_file, method = "curl", quiet = TRUE)
+    bin <- RCurl::getBinaryURL(url, userpwd = FTP_USERPWD, ftp.use.epsv = FALSE)
+    writeBin(bin, temp_file)
     
     # Read data to check if valid
     data <- read_csv(temp_file, show_col_types = FALSE)
@@ -70,43 +86,41 @@ download_csv <- function(remote_file, local_file) {
 # Function to sync practice data (2025 folder with MM/DD structure)
 sync_practice_data <- function() {
   cat("Syncing practice data...\n")
-  practice_base_path <- "/practice/2025/"
-  
-  # Get all subdirectories (month folders)
-  months <- list_ftp_files(practice_base_path)
-  month_dirs <- months[grepl("^\\d{2}$", months)]  # Match MM format
-  
+  years <- as.character(2025:year(Sys.Date()))
   downloaded_count <- 0
   
-  for (month_dir in month_dirs) {
-    month_path <- paste0(practice_base_path, month_dir, "/")
-    cat("Checking practice month:", month_dir, "\n")
+  for (yr in years) {
+    practice_base_path <- paste0("/practice/", yr, "/")
+    months <- list_ftp_files(practice_base_path)
+    month_dirs <- months[grepl("^\\d{2}$", months)]  # Match MM format
     
-    # Get day folders in this month
-    days <- list_ftp_files(month_path)
-    day_dirs <- days[grepl("^\\d{2}$", days)]  # Match DD format
-    
-    for (day_dir in day_dirs) {
-      day_path <- paste0(month_path, day_dir, "/")
-      cat("Processing practice date: 2025/", month_dir, "/", day_dir, "\n")
+    for (month_dir in month_dirs) {
+      month_path <- paste0(practice_base_path, month_dir, "/")
+      cat("Checking practice month:", yr, month_dir, "\n")
       
-      # Look for CSV files directly in the day folder (no CSV subdirectory)
-      files_in_day <- list_ftp_files(day_path)
-      csv_files <- files_in_day[grepl("\\.csv$", files_in_day, ignore.case = TRUE)]
+      days <- list_ftp_files(month_path)
+      day_dirs <- days[grepl("^\\d{2}$", days)]  # Match DD format
       
-      # Filter out files with "playerpositioning" in the name (allow unverified)
-      csv_files <- csv_files[!grepl("playerpositioning", csv_files, ignore.case = TRUE)]
-      
-      for (file in csv_files) {
-        remote_path <- paste0(day_path, file)
-        local_path <- file.path(LOCAL_PRACTICE_DIR, paste0("practice_", month_dir, "_", day_dir, "_", file))
+      for (day_dir in day_dirs) {
+        day_path <- paste0(month_path, day_dir, "/")
+        cat("Processing practice date:", yr, "/", month_dir, "/", day_dir, "\n")
         
-        if (download_csv(remote_path, local_path)) {
-          downloaded_count <- downloaded_count + 1
+        files_in_day <- list_ftp_files(day_path)
+        csv_files <- files_in_day[grepl("\\.csv$", files_in_day, ignore.case = TRUE)]
+        
+        # Filter out files with "playerpositioning" in the name (allow unverified)
+        csv_files <- csv_files[!grepl("playerpositioning", csv_files, ignore.case = TRUE)]
+        
+        for (file in csv_files) {
+          remote_path <- paste0(day_path, file)
+          local_path <- file.path(LOCAL_PRACTICE_DIR, paste0("practice_", yr, "_", month_dir, "_", day_dir, "_", file))
+          
+          if (download_csv(remote_path, local_path)) {
+            downloaded_count <- downloaded_count + 1
+          }
+          
+          Sys.sleep(0.1)
         }
-        
-        # Small delay between files
-        Sys.sleep(0.1)
       }
     }
   }
@@ -128,7 +142,7 @@ is_date_in_range <- function(file_path) {
   file_date <- as.Date(paste(date_match[2], date_match[3], date_match[4], sep = "-"))
   
   # Start date: August 1, 2025 (nothing before this)
-  start_date <- as.Date("2025-10-03")
+  start_date <- as.Date("2025-08-10")
   
   # Include all data from August 1, 2025 onwards (no future year restrictions)
   return(file_date >= start_date)
@@ -137,73 +151,67 @@ is_date_in_range <- function(file_path) {
 # Function to sync v3 data with date filtering
 sync_v3_data <- function() {
   cat("Syncing v3 data with date filtering...\n")
-  v3_base_path <- "/v3/2025/"
-  
-  # Get all subdirectories (month folders)
-  months <- list_ftp_files(v3_base_path)
-  month_dirs <- months[grepl("^\\d{2}$", months)]  # Match MM format
-  
+  years <- as.character(2025:year(Sys.Date()))
   downloaded_count <- 0
   
-  for (month_dir in month_dirs) {
-    month_path <- paste0(v3_base_path, month_dir, "/")
-    cat("Checking month:", month_dir, "\n")
+  for (yr in years) {
+    v3_base_path <- paste0("/v3/", yr, "/")
     
-    # Get day folders in this month
-    days <- list_ftp_files(month_path)
-    day_dirs <- days[grepl("^\\d{2}$", days)]  # Match DD format
+    months <- list_ftp_files(v3_base_path)
+    month_dirs <- months[grepl("^\\d{2}$", months)]  # Match MM format
     
-    for (day_dir in day_dirs) {
-      day_path <- paste0(month_path, day_dir, "/")
-      full_date_path <- paste0("2025/", month_dir, "/", day_dir)
+    for (month_dir in month_dirs) {
+      month_path <- paste0(v3_base_path, month_dir, "/")
+      cat("Checking month:", yr, month_dir, "\n")
       
-      # Check if this date is in our allowed ranges
-      if (!is_date_in_range(full_date_path)) {
-        next  # Skip this date
-      }
+      days <- list_ftp_files(month_path)
+      day_dirs <- days[grepl("^\\d{2}$", days)]  # Match DD format
       
-      cat("Processing date: 2025/", month_dir, "/", day_dir, "\n")
-      
-      # Look for CSV folder or direct CSV files
-      files_in_day <- list_ftp_files(day_path)
-      
-      # Check if there's a CSV subdirectory
-      if ("CSV" %in% files_in_day) {
-        csv_path <- paste0(day_path, "CSV/")
-        csv_files <- list_ftp_files(csv_path)
-        csv_files <- csv_files[grepl("\\.csv$", csv_files, ignore.case = TRUE)]
+      for (day_dir in day_dirs) {
+        day_path <- paste0(month_path, day_dir, "/")
+        full_date_path <- paste0(yr, "/", month_dir, "/", day_dir)
         
-        # Filter out files with "playerpositioning" or "unverified" in v3 folder
-        csv_files <- csv_files[!grepl("playerpositioning", csv_files, ignore.case = TRUE)]
-        
-        for (file in csv_files) {
-          remote_path <- paste0(csv_path, file)
-          local_path <- file.path(LOCAL_V3_DIR, paste0("v3_", month_dir, "_", day_dir, "_", file))
-          
-          if (download_csv(remote_path, local_path)) {
-            downloaded_count <- downloaded_count + 1
-          }
-          
-          # Small delay between files
-          Sys.sleep(0.1)
+        if (!is_date_in_range(full_date_path)) {
+          next  # Skip this date
         }
-      } else {
-        # Look for CSV files directly in the day folder
-        csv_files <- files_in_day[grepl("\\.csv$", files_in_day, ignore.case = TRUE)]
         
-        # Filter out files with "playerpositioning" or "unverified" in v3 folder
-        csv_files <- csv_files[!grepl("playerpositioning|unverified", csv_files, ignore.case = TRUE)]
+        cat("Processing date:", full_date_path, "\n")
         
-        for (file in csv_files) {
-          remote_path <- paste0(day_path, file)
-          local_path <- file.path(LOCAL_V3_DIR, paste0("v3_", month_dir, "_", day_dir, "_", file))
+        files_in_day <- list_ftp_files(day_path)
+        
+        if ("CSV" %in% files_in_day) {
+          csv_path <- paste0(day_path, "CSV/")
+          csv_files <- list_ftp_files(csv_path)
+          csv_files <- csv_files[grepl("\\.csv$", csv_files, ignore.case = TRUE)]
           
-          if (download_csv(remote_path, local_path)) {
-            downloaded_count <- downloaded_count + 1
+          # Filter out files with "playerpositioning" or "unverified" in v3 folder
+          csv_files <- csv_files[!grepl("playerpositioning", csv_files, ignore.case = TRUE)]
+          
+          for (file in csv_files) {
+            remote_path <- paste0(csv_path, file)
+            local_path <- file.path(LOCAL_V3_DIR, paste0("v3_", yr, "_", month_dir, "_", day_dir, "_", file))
+            
+            if (download_csv(remote_path, local_path)) {
+              downloaded_count <- downloaded_count + 1
+            }
+            
+            Sys.sleep(0.1)
           }
+        } else {
+          csv_files <- files_in_day[grepl("\\.csv$", files_in_day, ignore.case = TRUE)]
           
-          # Small delay between files
-          Sys.sleep(0.1)
+          csv_files <- csv_files[!grepl("playerpositioning|unverified", csv_files, ignore.case = TRUE)]
+          
+          for (file in csv_files) {
+            remote_path <- paste0(day_path, file)
+            local_path <- file.path(LOCAL_V3_DIR, paste0("v3_", yr, "_", month_dir, "_", day_dir, "_", file))
+            
+            if (download_csv(remote_path, local_path)) {
+              downloaded_count <- downloaded_count + 1
+            }
+            
+            Sys.sleep(0.1)
+          }
         }
       }
     }
