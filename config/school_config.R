@@ -100,11 +100,11 @@ school_config <- list(
     "Moseman, Cody"
   ),
   colors = list(
-    primary             = "#0d1224",   # deep navy used in the dark-mode radial gradient (gcu/app.R:17666-17674)
-    accent              = "#667eea",   # start of the active-tab/btn gradient (gcu/app.R:17464-17515)
-    accent_secondary    = "#764ba2",   # end of that same gradient
-    background          = "#f5f7fa",   # light page background (gcu/app.R:17135)
-    background_secondary= "#e8ecf1"   # the matching secondary background tone
+    primary             = "#000000",   # black from logo
+    accent              = "#ffd619",   # bright yellow highlight
+    accent_secondary    = "#ae122a",   # red gradient stop
+    background          = "#ffffff",   # clean light page base
+    background_secondary= "#f4f4f4"    # subtle off-white
     
   ),
   logo = "VMIlogo.png",
