@@ -12,7 +12,7 @@ initial_users <- data.frame(
   ),
   password = c(
     "cbu2024",           # Change this!
-    "cbu2024",           # Change this!
+    "cbu2024"           # Change this!
 
   ),
   admin = c(
