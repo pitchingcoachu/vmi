@@ -5758,10 +5758,14 @@ pitch_ui <- function(show_header = FALSE) {
           max-width: 100% !important;
         }
         /* Force tab content to full width */
-        .pitching-sidebar-hidden .tab-pane,
-        .pitching-sidebar-hidden .tab-pane.active {
+        .pitching-sidebar-hidden .tab-pane {
           width: 100% !important;
           max-width: 100% !important;
+        }
+        .pitching-sidebar-hidden .tab-pane:not(.active) {
+          display: none !important;
+        }
+        .pitching-sidebar-hidden .tab-pane.active {
           display: block !important;
         }',
       accent_color, accent_secondary_color, background_color, background_secondary_color))),
