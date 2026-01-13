@@ -1,4 +1,4 @@
-name: Daily GCU Data Sync and Deploy
+name: Daily VMI Data Sync and Deploy
 
 on:
   schedule:
