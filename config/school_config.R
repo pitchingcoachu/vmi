@@ -1,7 +1,46 @@
 # School-specific overrides for the shared app.
 # Copy this file to another repo and keep the same structure when you need to customize colors, logos, APIs, etc.
+
+parse_auth_db_config <- function(path = "auth_db_config.yml") {
+  if (!file.exists(path)) return(list())
+  lines <- trimws(readLines(path, warn = FALSE))
+  lines <- lines[lines != "" & !startsWith(lines, "#")]
+  cfg <- list()
+  for (line in lines) {
+    if (!grepl(":", line)) next
+    parts <- strsplit(line, ":", fixed = TRUE)[[1]]
+    key <- trimws(parts[1])
+    value <- trimws(paste(parts[-1], collapse = ":"))
+    cfg[[key]] <- value
+  }
+  cfg
+}
+
+load_neon_config <- function(team_code = "VMI", yaml_path = "auth_db_config.yml") {
+  yaml_cfg <- parse_auth_db_config(yaml_path)
+  pick <- function(env_name, yaml_key, default = "") {
+    val <- Sys.getenv(env_name, "")
+    if (nzchar(val)) return(val)
+    yval <- yaml_cfg[[yaml_key]]
+    if (!is.null(yval) && nzchar(yval)) return(yval)
+    default
+  }
+
+  list(
+    host = pick("NEON_HOST", "host"),
+    port = pick("NEON_PORT", "port", "5432"),
+    dbname = pick("NEON_DB", "dbname"),
+    user = pick("NEON_USER", "user"),
+    pass = pick("NEON_PASSWORD", "password"),
+    sslmode = pick("NEON_SSLMODE", "sslmode", "require"),
+    schema = pick("NEON_SCHEMA", "schema", "public"),
+    table_prefix = pick("NEON_TABLE_PREFIX", "table_prefix", tolower(team_code))
+  )
+}
+
+default_team_code <- "VMI"
 school_config <- list(
-  team_code = "VMI",
+  team_code = default_team_code,
   # Player filters
   allowed_pitchers = c(
   "Jones, Andrew",
@@ -120,16 +159,7 @@ school_config <- list(
     ftp_folder = "trackman",
     cloudinary_folder = "trackman"
   ),
-  neon = list(
-    host = Sys.getenv("NEON_HOST"),
-    port = as.integer(Sys.getenv("NEON_PORT", "5432")),
-    dbname = Sys.getenv("NEON_DB"),
-    user = Sys.getenv("NEON_USER"),
-    pass = Sys.getenv("NEON_PASSWORD"),
-    sslmode = Sys.getenv("NEON_SSLMODE", "require"),
-    schema = Sys.getenv("NEON_SCHEMA", "public"),
-    table_prefix = Sys.getenv("NEON_TABLE_PREFIX", tolower("VMI"))
-  )
+  neon = load_neon_config(team_code = default_team_code)
 )
 
 colorize_css <- function(css, accent, accent_secondary, background, background_secondary) {
