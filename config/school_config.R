@@ -119,6 +119,16 @@ school_config <- list(
     school_name = "VMI",
     ftp_folder = "trackman",
     cloudinary_folder = "trackman"
+  ),
+  neon = list(
+    host = Sys.getenv("NEON_HOST"),
+    port = as.integer(Sys.getenv("NEON_PORT", "5432")),
+    dbname = Sys.getenv("NEON_DB"),
+    user = Sys.getenv("NEON_USER"),
+    pass = Sys.getenv("NEON_PASSWORD"),
+    sslmode = Sys.getenv("NEON_SSLMODE", "require"),
+    schema = Sys.getenv("NEON_SCHEMA", "public"),
+    table_prefix = Sys.getenv("NEON_TABLE_PREFIX", tolower("VMI"))
   )
 )
 
