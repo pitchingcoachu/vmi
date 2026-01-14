@@ -4316,6 +4316,88 @@ usage_by_type <- function(df) {
 library(readr)
 library(stringr)   # explicit, even though tidyverse includes it
 
+# Load from Neon when local CSVs are missing
+load_neon_pitch_data <- function(cfg) {
+  if (is.null(cfg)) return(NULL)
+  required_keys <- c("host", "dbname", "user", "pass")
+  missing_keys <- required_keys[vapply(required_keys, function(key) !nzchar(cfg[[key]] %||% ""), logical(1))]
+  if (length(missing_keys)) {
+    message("Neon configuration missing keys: ", paste(missing_keys, collapse = ", "))
+    return(NULL)
+  }
+
+  port <- as.integer(cfg$port %||% 5432)
+  sslmode <- cfg$sslmode %||% "require"
+  schema <- cfg$schema %||% "public"
+  prefix <- cfg$table_prefix %||% tolower(TEAM_CODE)
+  table_prefix <- gsub("[^a-z0-9_]+", "", tolower(prefix))
+  table_map <- list(
+    Bullpen = paste0(table_prefix, "_practice_data"),
+    Live    = paste0(table_prefix, "_v3_data")
+  )
+
+  con <- tryCatch({
+    DBI::dbConnect(
+      RPostgres::Postgres(),
+      host     = cfg$host,
+      port     = port,
+      dbname   = cfg$dbname,
+      user     = cfg$user,
+      password = cfg$pass,
+      sslmode  = sslmode
+    )
+  }, error = function(e) {
+    message("Unable to connect to Neon: ", e$message)
+    NULL
+  })
+  if (is.null(con)) return(NULL)
+  on.exit(DBI::dbDisconnect(con), add = TRUE)
+
+  qualify_id <- function(name) {
+    if (nzchar(schema) && schema != "public") {
+      DBI::Id(schema = schema, table = name)
+    } else {
+      DBI::Id(table = name)
+    }
+  }
+
+  rows <- list()
+  tables <- character(0)
+  for (session_label in names(table_map)) {
+    table_name <- table_map[[session_label]]
+    table_id <- qualify_id(table_name)
+    if (!DBI::dbExistsTable(con, table_id)) next
+    df <- tryCatch(DBI::dbReadTable(con, table_id), error = function(e) {
+      message("Unable to read Neon table ", table_name, ": ", e$message)
+      NULL
+    })
+    if (is.null(df) || nrow(df) == 0) next
+
+    df <- as.data.frame(df, stringsAsFactors = FALSE)
+    to_char <- function(col) {
+      if (is.list(col)) {
+        vapply(col, function(x) if (is.null(x)) NA_character_ else as.character(x), character(1))
+      } else {
+        as.character(col)
+      }
+    }
+    df[] <- lapply(df, to_char)
+
+    session_col <- if ("SessionType" %in% names(df)) as.character(df$SessionType) else rep(NA_character_, nrow(df))
+    blank_session <- is.na(session_col) | trimws(session_col) == ""
+    blank_session[is.na(blank_session)] <- TRUE
+    session_col[blank_session] <- session_label
+    df$SessionType <- session_col
+
+    df$SourceFile <- paste0("neon://", table_name)
+    rows[[table_name]] <- df
+    tables <- c(tables, table_name)
+  }
+
+  if (!length(rows)) return(NULL)
+  list(data = dplyr::bind_rows(rows), tables = tables)
+}
+
 # Point to the app's local data folder (works locally & on shinyapps.io)
 data_parent <- normalizePath(file.path(getwd(), "data"), mustWork = TRUE)
 
@@ -4328,7 +4410,24 @@ all_csvs <- list.files(
 )
 all_csvs <- all_csvs[ grepl("([/\\\\]practice[/\\\\])|([/\\\\]v3[/\\\\])", tolower(all_csvs)) ]
 
-if (!length(all_csvs)) stop("No CSVs found under: ", data_parent)
+neon_result <- NULL
+data_source_label <- NULL
+if (!length(all_csvs)) {
+  neon_result <- load_neon_pitch_data(school_setting("neon", NULL))
+  if (is.null(neon_result) || is.null(neon_result$data) || !nrow(neon_result$data)) {
+    stop("No CSVs found under: ", data_parent, " and Neon data is not available")
+  }
+  table_names <- neon_result$tables %||% character(0)
+  table_count <- length(table_names)
+  neon_label <- if (table_count == 1) "1 Neon table" else paste0(table_count, " Neon tables")
+  if (table_count > 0) {
+    neon_label <- paste0(neon_label, " (", paste(table_names, collapse = ", "), ")")
+  }
+  data_source_label <- neon_label
+} else {
+  csv_count <- length(all_csvs)
+  data_source_label <- if (csv_count == 1) "1 CSV file" else paste0(csv_count, " CSV files")
+}
 
 # Map folder → SessionType
 infer_session_from_path <- function(fp) {
@@ -4589,7 +4688,11 @@ draw_heat <- function(grid, bins = HEAT_BINS, pal_fun = heat_pal_red,
 }
 
 
-pitch_data <- purrr::map_dfr(all_csvs, read_one)
+pitch_data <- if (length(all_csvs)) {
+  purrr::map_dfr(all_csvs, read_one)
+} else {
+  neon_result$data
+}
 
 # Ensure required columns exist since downstream code expects them
 # ------ add to need_cols ------
@@ -4739,8 +4842,8 @@ pitch_data <- ensure_pitch_keys(pitch_data)
 counts <- table(pitch_data$SessionType, useNA = "no")
 bcount <- if ("Bullpen" %in% names(counts)) counts[["Bullpen"]] else 0
 lcount <- if ("Live"    %in% names(counts)) counts[["Live"]]    else 0
-message("Loaded ", nrow(pitch_data), " rows from ", length(all_csvs),
-        " files | Bullpen: ", bcount, " | Live: ", lcount,
+message("Loaded ", nrow(pitch_data), " rows from ", data_source_label,
+        " | Bullpen: ", bcount, " | Live: ", lcount,
         " | root: ", data_parent)
 
 
@@ -34147,7 +34250,24 @@ all_csvs <- list.files(
 )
 all_csvs <- all_csvs[ grepl("([/\\\\]practice[/\\\\])|([/\\\\]v3[/\\\\])", tolower(all_csvs)) ]
 
-if (!length(all_csvs)) stop("No CSVs found under: ", data_parent)
+neon_result <- NULL
+data_source_label <- NULL
+if (!length(all_csvs)) {
+  neon_result <- load_neon_pitch_data(school_setting("neon", NULL))
+  if (is.null(neon_result) || is.null(neon_result$data) || !nrow(neon_result$data)) {
+    stop("No CSVs found under: ", data_parent, " and Neon data is not available")
+  }
+  table_names <- neon_result$tables %||% character(0)
+  table_count <- length(table_names)
+  neon_label <- if (table_count == 1) "1 Neon table" else paste0(table_count, " Neon tables")
+  if (table_count > 0) {
+    neon_label <- paste0(neon_label, " (", paste(table_names, collapse = ", "), ")")
+  }
+  data_source_label <- neon_label
+} else {
+  csv_count <- length(all_csvs)
+  data_source_label <- if (csv_count == 1) "1 CSV file" else paste0(csv_count, " CSV files")
+}
 
 # Map folder → SessionType
 infer_session_from_path <- function(fp) {
@@ -34408,7 +34528,11 @@ draw_heat <- function(grid, bins = HEAT_BINS, pal_fun = heat_pal_red,
 }
 
 
-pitch_data <- purrr::map_dfr(all_csvs, read_one)
+pitch_data <- if (length(all_csvs)) {
+  purrr::map_dfr(all_csvs, read_one)
+} else {
+  neon_result$data
+}
 
 # Ensure required columns exist since downstream code expects them
 # ------ add to need_cols ------
@@ -34558,8 +34682,8 @@ pitch_data <- ensure_pitch_keys(pitch_data)
 counts <- table(pitch_data$SessionType, useNA = "no")
 bcount <- if ("Bullpen" %in% names(counts)) counts[["Bullpen"]] else 0
 lcount <- if ("Live"    %in% names(counts)) counts[["Live"]]    else 0
-message("Loaded ", nrow(pitch_data), " rows from ", length(all_csvs),
-        " files | Bullpen: ", bcount, " | Live: ", lcount,
+message("Loaded ", nrow(pitch_data), " rows from ", data_source_label,
+        " | Bullpen: ", bcount, " | Live: ", lcount,
         " | root: ", data_parent)
 
 
