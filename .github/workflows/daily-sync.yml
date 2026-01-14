@@ -1,0 +1,107 @@
+name: Daily VMI Data Sync and Deploy
+
+on:
+  schedule:
+    - cron: '0 21 * * *'   # 5:00 PM ET
+    - cron: '0 2 * * *'    # 10:00 PM ET
+    - cron: '0 12 * * *'   # 8:00 AM ET
+  workflow_dispatch:
+
+jobs:
+  sync-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      NEON_HOST: ${{ secrets.NEON_HOST }}
+      NEON_DB: ${{ secrets.NEON_DB }}
+      NEON_USER: ${{ secrets.NEON_USER }}
+      NEON_PASSWORD: ${{ secrets.NEON_PASSWORD }}
+      NEON_PORT: ${{ secrets.NEON_PORT }}
+      NEON_SSLMODE: ${{ secrets.NEON_SSLMODE }}
+      NEON_TABLE_PREFIX: vmi
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Setup R
+      uses: r-lib/actions/setup-r@v2
+      with:
+        r-version: '4.4.0'
+        
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libcurl4-openssl-dev \
+          libssl-dev \
+          libxml2-dev \
+          libfontconfig1-dev \
+          libharfbuzz-dev \
+          libfribidi-dev \
+          libfreetype6-dev \
+          libpng-dev \
+          libjpeg-dev \
+          libtiff-dev \
+          libfontconfig1 \
+          libxcb1 \
+          libicu-dev \
+          libcairo2-dev \
+          libgdal-dev \
+          libgeos-dev \
+          libproj-dev \
+          libudunits2-dev
+
+    - name: Write .Renviron
+      run: |
+        cat > .Renviron <<'EOF'
+        PITCH_MOD_DB_PATH=/home/shiny/pcu_pitch_dashboard/pitch_modifications.db
+        PITCH_MOD_EXPORT_PATH=/home/shiny/pcu_pitch_dashboard/pitch_type_modifications.csv
+        MYSQL_HOST=${{ secrets.MYSQL_HOST }}
+        MYSQL_DB=${{ secrets.MYSQL_DB }}
+        MYSQL_USER=${{ secrets.MYSQL_USER }}
+        MYSQL_PASSWORD=${{ secrets.MYSQL_PASSWORD }}
+        MYSQL_PORT=3306
+        MYSQL_SSL_CA=
+        # Persist shinymanager credentials between deploys
+        CREDENTIALS_SQLITE_PATH=/home/shiny/credentials.sqlite
+        EOF
+
+    - name: Install R packages
+      run: Rscript install_packages.R
+          
+    - name: Configure rsconnect
+      env:
+        SHINYAPPS_ACCOUNT: ${{ secrets.SHINYAPPS_ACCOUNT }}
+        SHINYAPPS_TOKEN: ${{ secrets.SHINYAPPS_TOKEN }}
+        SHINYAPPS_SECRET: ${{ secrets.SHINYAPPS_SECRET }}
+      run: |
+        Rscript -e "rsconnect::setAccountInfo(name='${{ secrets.SHINYAPPS_ACCOUNT }}', token='${{ secrets.SHINYAPPS_TOKEN }}', secret='${{ secrets.SHINYAPPS_SECRET }}')"
+        
+    - name: Sync OSU data
+      run: Rscript automated_data_sync.R
+        
+    - name: Sync TrackMan media (EdgeR → Cloudinary)
+      run: Rscript trackman_api_sync.R
+      env:
+        TM_CLIENT_ID: ${{ secrets.TM_CLIENT_ID }}
+        TM_CLIENT_SECRET: ${{ secrets.TM_CLIENT_SECRET }}
+        CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+        CLOUDINARY_UPLOAD_PRESET: ${{ secrets.CLOUDINARY_UPLOAD_PRESET }}
+        CLOUDINARY_FOLDER: ${{ secrets.CLOUDINARY_FOLDER }}
+        TM_LOOKBACK_DAYS: ${{ secrets.TM_LOOKBACK_DAYS }}
+        TM_ENV: ${{ secrets.TM_ENV }}
+        
+    - name: Check for new data flag
+      id: check_data
+      run: |
+        if [ -f "data/new_data_flag.txt" ]; then
+          echo "data_updated=true" >> $GITHUB_OUTPUT
+          echo "New data flag detected"
+        else
+          echo "data_updated=false" >> $GITHUB_OUTPUT
+          echo "No new data this run"
+        fi
+
+    - name: Deploy to shinyapps.io
+      if: steps.check_data.outputs.data_updated == 'true' || github.event_name == 'workflow_dispatch'
+      run: Rscript deploy_script.R
