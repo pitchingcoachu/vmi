@@ -121,6 +121,27 @@ ensure_data_table <- function(table_name, sample_row) {
   }
 }
 
+index_columns <- c("Date", "Pitcher", "TaggedPitchType", "SessionType", "PlayID")
+
+ensure_table_indexes <- function(table_name) {
+  table_id <- qualify_id(table_name)
+  if (!DBI::dbExistsTable(conn, table_id)) return()
+  available_fields <- DBI::dbListFields(conn, table_id)
+  cols <- intersect(index_columns, available_fields)
+  if (!length(cols)) return()
+  quoted_table <- qualify_sql(table_name)
+  for (col in cols) {
+    safe_col <- DBI::dbQuoteIdentifier(conn, col)
+    idx_name <- paste0(table_name, "_", tolower(col), "_idx")
+    idx_name <- gsub("[^a-z0-9_]+", "_", idx_name)
+    quoted_idx <- DBI::dbQuoteIdentifier(conn, idx_name)
+    sql <- paste0("CREATE INDEX IF NOT EXISTS ", quoted_idx, " ON ", quoted_table, " (", safe_col, ")")
+    tryCatch(DBI::dbExecute(conn, sql), error = function(e) {
+      message("Warning: failed to create index ", idx_name, ": ", e$message)
+    })
+  }
+}
+
 ensure_all_columns_text <- function(table_name) {
   fields <- DBI::dbListFields(conn, qualify_id(table_name))
   for (field in fields) {
@@ -164,6 +185,7 @@ upload_to_neon <- function(table_name, data) {
   text_ready <- coerce_to_text(data)
   ensure_data_table(table_name, text_ready)
   ensure_all_columns_text(table_name)
+  ensure_table_indexes(table_name)
   available_keys <- intersect(key_columns, names(text_ready))
   ensure_unique_index(table_name, available_keys)
   temp_table <- paste0(table_name, "_tmp_", as.integer(runif(1, 1, 1e8)))
